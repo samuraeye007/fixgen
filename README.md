@@ -52,12 +52,16 @@ http://127.0.0.1:8080.
 1. Get a draft spec from the venue's PDF:
 
    ```bash
-   export ANTHROPIC_API_KEY=...
+   cp .env.example .env   # then set SPECGEN_API_KEY (or GEMINI_API_KEY) in .env
    ```
 
    ```bash
-   fixgen specgen path/to/venue-fix-spec.pdf --venue-id xyz --venue-name "XYZ Exchange"
+   fixgen specgen path/to/venue-fix-spec.pdf --venue-id xyz --venue-name "XYZ Exchange" \
+     --base-url gemini --model gemini-2.5-flash --workers 1
    ```
+
+   Any OpenAI-compatible server works. For a fully local, free run use `--base-url ollama`
+   (the default) with a model you have pulled. `--provider claude` uses the Anthropic API.
 
    This writes `specgen-out/xyz.yaml` and `specgen-out/xyz.review.md`. Each chunk's raw
    extraction is cached in `specgen-out/xyz.chunks/`, so a re-run only pays for chunks

@@ -31,6 +31,9 @@ PRESETS = {
 }
 
 
+PROVIDER_KEY_VARS = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+
+
 def chunk_text(pdf: bytes, first_page: int) -> str:
     from pypdf import PdfReader
 
@@ -53,7 +56,10 @@ class OpenAICompatibleExtractor:
         "json_object" (JSON mode + schema in the prompt) or "none" (prompt only)."""
         self.model = model
         self.base_url = PRESETS.get(base_url, base_url).rstrip("/")
-        self.api_key = api_key if api_key is not None else os.environ.get("SPECGEN_API_KEY", "")
+        if api_key is None:
+            # SPECGEN_API_KEY wins; otherwise the provider's usual variable name.
+            api_key = os.environ.get("SPECGEN_API_KEY") or os.environ.get(PROVIDER_KEY_VARS.get(base_url, ""), "")
+        self.api_key = api_key
         self.timeout = timeout
         self.structured = structured
         self._post = post or self._http_post

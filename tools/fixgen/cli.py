@@ -75,6 +75,10 @@ def cmd_specgen(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from . import REPO_ROOT
+    from .dotenv import load_dotenv
+
+    load_dotenv(".env", REPO_ROOT / ".env")  # e.g. SPECGEN_API_KEY=...; see .env.example
     p = argparse.ArgumentParser(prog="fixgen")
     sub = p.add_subparsers(dest="cmd", required=True)
 

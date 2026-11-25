@@ -249,3 +249,22 @@ def test_openai_compatible_extractor_backs_off_on_rate_limit(tmp_path):
     ex = OpenAICompatibleExtractor(model="m", base_url="gemini", post=post, sleep=slept.append)
     assert ex(chunk(tmp_path), "V") == CHUNK_2
     assert slept == [7.0, 7.0]
+
+
+def test_dotenv_and_provider_key_lookup(tmp_path, monkeypatch):
+    from fixgen.dotenv import load_dotenv
+    from fixgen.specgen.openai_compat import OpenAICompatibleExtractor
+
+    for k in ("SPECGEN_API_KEY", "GEMINI_API_KEY", "FROM_SHELL"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("FROM_SHELL", "shell")
+    env = tmp_path / ".env"
+    env.write_text('# comment\nexport GEMINI_API_KEY="abc 123"\nFROM_SHELL=file  # ignored\nEMPTY=\n')
+    assert load_dotenv(tmp_path / "missing", env) == env
+    import os
+    assert os.environ["GEMINI_API_KEY"] == "abc 123"
+    assert os.environ["FROM_SHELL"] == "shell"  # shell wins
+    assert OpenAICompatibleExtractor(model="m", base_url="gemini").api_key == "abc 123"
+    monkeypatch.setenv("SPECGEN_API_KEY", "generic")
+    assert OpenAICompatibleExtractor(model="m", base_url="gemini").api_key == "generic"
+    monkeypatch.delenv("GEMINI_API_KEY")

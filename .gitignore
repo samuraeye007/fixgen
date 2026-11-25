@@ -79,3 +79,6 @@ specgen-out/
 
 # QuickFIX message stores
 var/
+
+# Local secrets
+.env
