@@ -2,7 +2,9 @@
 
   fixgen validate spec/venues/*.yaml
   fixgen codegen --out build/generated spec/venues/*.yaml
-  fixgen specgen --venue-id lse --venue-name "London Stock Exchange" spec.pdf
+  fixgen specgen --venue-id xyz --model qwen2.5:14b spec.pdf               # local Ollama, free
+  fixgen specgen --venue-id xyz --base-url gemini --model gemini-2.5-flash spec.pdf  # free tier
+  fixgen specgen --venue-id xyz --provider claude spec.pdf
 """
 from __future__ import annotations
 
@@ -48,10 +50,20 @@ def cmd_codegen(args) -> int:
 def cmd_specgen(args) -> int:
     from .specgen.extract import ClaudeExtractor, ExtractionError, run
 
+    if args.provider == "claude":
+        extractor = ClaudeExtractor(model=args.model or "claude-opus-5-5", effort=args.effort)
+        pages = args.pages_per_chunk or 25
+    else:
+        from .specgen.openai_compat import OpenAICompatibleExtractor
+
+        if not args.model:
+            print("--model is required with --provider openai (e.g. qwen2.5:14b for Ollama)", file=sys.stderr)
+            return 2
+        extractor = OpenAICompatibleExtractor(model=args.model, base_url=args.base_url, structured=args.structured)
+        pages = args.pages_per_chunk or 8  # text models usually have smaller context windows
     try:
         spec, report, ok = run(args.pdf, args.venue_id, args.venue_name or args.venue_id, args.out,
-                               extractor=ClaudeExtractor(model=args.model, effort=args.effort),
-                               pages_per_chunk=args.pages_per_chunk, workers=args.workers)
+                               extractor=extractor, pages_per_chunk=pages, workers=args.workers)
     except ExtractionError as e:
         print(f"extraction failed: {e}", file=sys.stderr)
         return 1
@@ -76,15 +88,24 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("specs", nargs="+")
     c.set_defaults(fn=cmd_codegen)
 
-    s = sub.add_parser("specgen", help="extract a venue spec from a PDF with Claude")
+    s = sub.add_parser("specgen", help="extract a venue spec from a PDF with an LLM")
     s.add_argument("pdf")
     s.add_argument("--venue-id", required=True, help="lower_snake_case id, becomes the file name")
     s.add_argument("--venue-name")
     s.add_argument("--out", default="specgen-out")
-    s.add_argument("--model", default="claude-opus-5-5")
-    s.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"])
-    s.add_argument("--pages-per-chunk", type=int, default=25)
-    s.add_argument("--workers", type=int, default=4)
+    s.add_argument("--provider", default="openai", choices=["openai", "claude"],
+                   help="openai: any OpenAI-compatible server (Ollama, LM Studio, Gemini, Groq, ...); "
+                        "claude: Anthropic API (needs ANTHROPIC_API_KEY)")
+    s.add_argument("--base-url", default="ollama",
+                   help="server URL or preset: ollama, lmstudio, gemini, groq, openrouter. "
+                        "Hosted servers read the key from SPECGEN_API_KEY")
+    s.add_argument("--model", help="model name on that server")
+    s.add_argument("--structured", default="json_schema", choices=["json_schema", "json_object", "none"],
+                   help="how strongly to constrain output; lower it if the server rejects the request")
+    s.add_argument("--effort", default="high", choices=["low", "medium", "high", "xhigh", "max"],
+                   help="claude only")
+    s.add_argument("--pages-per-chunk", type=int, help="default 8 (openai) or 25 (claude)")
+    s.add_argument("--workers", type=int, default=2, help="parallel chunks; use 1 for a local model")
     s.set_defaults(fn=cmd_specgen)
 
     args = p.parse_args(argv)

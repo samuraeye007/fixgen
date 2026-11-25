@@ -189,3 +189,63 @@ def test_claude_extractor_surfaces_bad_stops(tmp_path, stop):
     msg = SimpleNamespace(stop_reason=stop, stop_details=SimpleNamespace(category="cyber"), content=[])
     with pytest.raises(ExtractionError, match="declined" if stop == "refusal" else "max_tokens"):
         ClaudeExtractor(client=FakeClient(msg))(chunk(tmp_path), "V")
+
+
+# ------------------------------------------------------------------ OpenAI-compatible (free) backend
+def test_openai_compatible_extractor_request_and_validation(tmp_path):
+    from fixgen.specgen.openai_compat import OpenAICompatibleExtractor
+
+    calls = []
+
+    def post(url, body):
+        calls.append((url, body))
+        return {"choices": [{"finish_reason": "stop", "message": {"content": "```json\n" + json.dumps(CHUNK_2) + "\n```"}}]}
+
+    ex = OpenAICompatibleExtractor(model="qwen2.5:14b", base_url="ollama", post=post)
+    assert ex(chunk(tmp_path), "V") == CHUNK_2
+    url, body = calls[0]
+    assert url == "http://localhost:11434/v1/chat/completions"
+    assert body["model"] == "qwen2.5:14b" and body["temperature"] == 0
+    assert body["response_format"]["json_schema"]["schema"] == CHUNK_SCHEMA
+    assert "===== page 1 =====" in body["messages"][1]["content"]
+
+
+def test_openai_compatible_extractor_repairs_once_then_fails(tmp_path):
+    from fixgen.specgen.openai_compat import OpenAICompatibleExtractor
+
+    replies = iter(['{"fields": []}', json.dumps(CHUNK_2)])
+    calls = []
+
+    def post(url, body):
+        calls.append(body)
+        return {"choices": [{"finish_reason": "stop", "message": {"content": next(replies)}}]}
+
+    ex = OpenAICompatibleExtractor(model="m", base_url="http://x/v1", structured="json_object", post=post)
+    assert ex(chunk(tmp_path), "V") == CHUNK_2
+    assert len(calls) == 2 and "invalid" in calls[1]["messages"][-1]["content"]
+    assert calls[0]["response_format"] == {"type": "json_object"}
+
+    bad = OpenAICompatibleExtractor(model="m", base_url="http://x/v1",
+                                    post=lambda u, b: {"choices": [{"message": {"content": "nope"}}]})
+    with pytest.raises(ExtractionError, match="did not match"):
+        bad(chunk(tmp_path), "V")
+
+
+def test_openai_compatible_extractor_backs_off_on_rate_limit(tmp_path):
+    import io as _io
+    import urllib.error
+
+    from fixgen.specgen.openai_compat import OpenAICompatibleExtractor
+
+    state = {"n": 0}
+    slept = []
+
+    def post(url, body):
+        state["n"] += 1
+        if state["n"] < 3:
+            raise urllib.error.HTTPError(url, 429, "Too Many Requests", {"Retry-After": "7"}, _io.BytesIO(b"slow down"))
+        return {"choices": [{"message": {"content": json.dumps(CHUNK_2)}}]}
+
+    ex = OpenAICompatibleExtractor(model="m", base_url="gemini", post=post, sleep=slept.append)
+    assert ex(chunk(tmp_path), "V") == CHUNK_2
+    assert slept == [7.0, 7.0]
