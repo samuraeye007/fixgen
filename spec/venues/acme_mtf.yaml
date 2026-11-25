@@ -1,0 +1,122 @@
+# Second fictional venue, deliberately different from demo_exch, to show what the
+# generated adapters absorb: FIXT.1.1 transport, ISIN instrument ids, a custom
+# mandatory tag, no market orders, no replace, and an extra logon field.
+spec_version: 1
+venue:
+  id: acme_mtf
+  name: ACME MTF
+  description: Fictional FIX 5.0SP2 MTF.
+  source: {document: "ACME MTF Trading Interface FIX 5.0 SP2", version: "3.4"}
+
+session:
+  begin_string: FIXT.1.1
+  default_appl_ver_id: "9"
+  heartbeat_interval: 20
+  reset_seq_num_on_logon: true
+  logon_fields:
+    - {field: Username, from: credential.username}
+    - {field: Password, from: credential.password}
+    - {field: MemberCode, from: credential.member_code}
+
+fields:
+  - {tag: 1,     name: Account,      type: STRING}
+  - {tag: 6,     name: AvgPx,        type: PRICE}
+  - {tag: 11,    name: ClOrdID,      type: STRING}
+  - {tag: 14,    name: CumQty,       type: QTY}
+  - {tag: 17,    name: ExecID,       type: STRING}
+  - {tag: 22,    name: SecurityIDSource, type: STRING, values: [{value: "4", name: ISIN}]}
+  - {tag: 31,    name: LastPx,       type: PRICE}
+  - {tag: 32,    name: LastQty,      type: QTY}
+  - {tag: 37,    name: OrderID,      type: STRING}
+  - {tag: 38,    name: OrderQty,     type: QTY}
+  - {tag: 39,    name: OrdStatus,    type: CHAR, values: [
+        {value: "0", name: New}, {value: "1", name: PartiallyFilled}, {value: "2", name: Filled},
+        {value: "4", name: Canceled}, {value: "8", name: Rejected}, {value: "C", name: Expired}]}
+  - {tag: 40,    name: OrdType,      type: CHAR, values: [{value: "2", name: Limit}]}
+  - {tag: 41,    name: OrigClOrdID,  type: STRING}
+  - {tag: 44,    name: Price,        type: PRICE}
+  - {tag: 48,    name: SecurityID,   type: STRING}
+  - {tag: 54,    name: Side,         type: CHAR, values: [{value: "1", name: Buy}, {value: "2", name: Sell}]}
+  - {tag: 58,    name: Text,         type: STRING}
+  - {tag: 59,    name: TimeInForce,  type: CHAR, values: [
+        {value: "0", name: Day}, {value: "1", name: GoodTillCancel}, {value: "3", name: ImmediateOrCancel}]}
+  - {tag: 60,    name: TransactTime, type: UTCTIMESTAMP}
+  - {tag: 150,   name: ExecType,     type: CHAR, values: [
+        {value: "0", name: New}, {value: "4", name: Canceled}, {value: "8", name: Rejected},
+        {value: "C", name: Expired}, {value: "F", name: Trade}]}
+  - {tag: 151,   name: LeavesQty,    type: QTY}
+  - {tag: 434,   name: CxlRejResponseTo, type: CHAR, values: [{value: "1", name: OrderCancelRequest}]}
+  - {tag: 553,   name: Username,     type: STRING}
+  - {tag: 554,   name: Password,     type: STRING}
+  - {tag: 20001, name: ClientCapacity, type: CHAR, custom: true,
+     description: "Capacity in which the member is acting.",
+     values: [{value: "A", name: Agency}, {value: "P", name: Principal}, {value: "R", name: RisklessPrincipal}]}
+  - {tag: 20010, name: MemberCode,   type: STRING, custom: true}
+
+messages:
+  - msg_type: D
+    name: NewOrderSingle
+    direction: to_venue
+    fields:
+      - {field: ClOrdID, required: true}
+      - {field: Account, required: true}
+      - {field: SecurityID, required: true}
+      - {field: SecurityIDSource, required: true}
+      - {field: Side, required: true}
+      - {field: TransactTime, required: true}
+      - {field: OrderQty, required: true}
+      - {field: OrdType, required: true}
+      - {field: Price, required: true}
+      - {field: TimeInForce, required: true}
+      - {field: ClientCapacity, required: true}
+  - msg_type: F
+    name: OrderCancelRequest
+    direction: to_venue
+    fields:
+      - {field: OrigClOrdID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: SecurityID, required: true}
+      - {field: SecurityIDSource, required: true}
+      - {field: Side, required: true}
+      - {field: TransactTime, required: true}
+  - msg_type: "8"
+    name: ExecutionReport
+    direction: from_venue
+    fields:
+      - {field: OrderID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: OrigClOrdID, required: false}
+      - {field: ExecID, required: true}
+      - {field: ExecType, required: true}
+      - {field: OrdStatus, required: true}
+      - {field: SecurityID, required: true}
+      - {field: SecurityIDSource, required: true}
+      - {field: Side, required: true}
+      - {field: LastQty, required: false}
+      - {field: LastPx, required: false}
+      - {field: LeavesQty, required: true}
+      - {field: CumQty, required: true}
+      - {field: AvgPx, required: true}
+      - {field: Text, required: false}
+  - msg_type: "9"
+    name: OrderCancelReject
+    direction: from_venue
+    fields:
+      - {field: OrderID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: OrigClOrdID, required: true}
+      - {field: OrdStatus, required: true}
+      - {field: CxlRejResponseTo, required: true}
+      - {field: Text, required: false}
+
+order_entry:
+  instrument: {field: SecurityID, extra: {SecurityIDSource: "4"}}
+  account: {field: Account, required: true}
+  side: {buy: "1", sell: "2"}
+  ord_type: {limit: "2"}
+  time_in_force: {day: "0", gtc: "1", ioc: "3"}
+  defaults: {}
+  cancel: true
+  replace: false
+  exec_type: {new: "0", canceled: "4", rejected: "8", expired: "C", trade: "F"}
+  ord_status: {new: "0", partially_filled: "1", filled: "2", canceled: "4", rejected: "8", expired: "C"}

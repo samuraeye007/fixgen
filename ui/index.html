@@ -1,0 +1,397 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fixgen Order Blaster</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --panel-2: #f0f2f5; --border: #dde1e7; --text: #1b2330;
+    --muted: #677285; --accent: #2457d6; --accent-text: #fff; --buy: #12805c; --sell: #c2353b;
+    --warn: #a86400; --ok: #12805c; --bad: #c2353b; --idle: #8a93a3;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1116; --panel: #161b22; --panel-2: #1d242e; --border: #2a323d; --text: #e3e8ef;
+      --muted: #8b95a5; --accent: #4c7dff; --buy: #2fbf8a; --sell: #ff6b6b; --warn: #e3a23b;
+      --ok: #2fbf8a; --bad: #ff6b6b; --idle: #6b7484;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1116; --panel: #161b22; --panel-2: #1d242e; --border: #2a323d; --text: #e3e8ef;
+    --muted: #8b95a5; --accent: #4c7dff; --buy: #2fbf8a; --sell: #ff6b6b; --warn: #e3a23b;
+    --ok: #2fbf8a; --bad: #ff6b6b; --idle: #6b7484;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .2px; }
+  #conn { font-size: 12px; color: var(--muted); }
+  #sessions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2); font-size: 12px; white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
+  .dot.active { background: var(--ok); } .dot.logon_sent, .dot.logout_sent { background: var(--warn); } .dot.disconnected { background: var(--bad); }
+  .pill button { border: 0; background: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 12px; }
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 12px; padding: 12px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; min-width: 0; }
+  section > h2 { margin: 0; padding: 9px 12px; font-size: 12px; text-transform: uppercase; letter-spacing: .6px; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  section > h2 .spacer { flex: 1; }
+  form { padding: 12px; display: grid; gap: 10px; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  label .req { color: var(--bad); }
+  input, select { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; width: 100%; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .sides { display: grid; grid-auto-flow: column; gap: 6px; }
+  .sides button { font: inherit; padding: 7px 0; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; }
+  .sides button.on.buy { background: var(--buy); color: #fff; border-color: var(--buy); }
+  .sides button.on.sell { background: var(--sell); color: #fff; border-color: var(--sell); }
+  .extras { display: grid; gap: 10px; padding-top: 4px; border-top: 1px dashed var(--border); }
+  .extras:empty { display: none; }
+  .hint { font-size: 11px; color: var(--muted); }
+  .send { font: inherit; font-weight: 600; padding: 9px; border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-text); cursor: pointer; }
+  .send:disabled { opacity: .5; cursor: default; }
+  #ticket-error { color: var(--bad); font-size: 12px; min-height: 16px; white-space: pre-wrap; }
+  .table-wrap { overflow: auto; max-height: 48vh; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 5px 8px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { position: sticky; top: 0; background: var(--panel); font-size: 11px; color: var(--muted); font-weight: 600; z-index: 1; }
+  td.num, th.num { text-align: right; }
+  td.text { white-space: normal; max-width: 260px; color: var(--muted); }
+  .buy { color: var(--buy); } .sell, .sell_short, .sell_short_exempt { color: var(--sell); }
+  .status { padding: 1px 7px; border-radius: 4px; font-size: 11px; background: var(--panel-2); border: 1px solid var(--border); }
+  .status.filled { color: var(--ok); border-color: var(--ok); } .status.rejected { color: var(--bad); border-color: var(--bad); }
+  .status.canceled, .status.expired { color: var(--muted); } .status.partially_filled { color: var(--warn); border-color: var(--warn); }
+  .warn-flag { color: var(--warn); cursor: help; }
+  td.actions button { font: inherit; font-size: 11px; padding: 2px 8px; margin-right: 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; }
+  td.actions button:disabled { opacity: .4; cursor: default; }
+  .empty { padding: 24px; text-align: center; color: var(--muted); }
+  #log { font: 12px/1.5 var(--mono); max-height: 30vh; overflow: auto; padding: 6px 12px; margin: 0; }
+  #log .out { color: var(--accent); } #log .in { color: var(--buy); }
+  #log .line { white-space: pre-wrap; word-break: break-all; }
+  #log .sess { color: var(--muted); }
+  .grid-right { display: grid; gap: 12px; min-width: 0; }
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
+  .toast { background: var(--panel); border: 1px solid var(--border); border-left: 4px solid var(--bad); border-radius: 6px; padding: 8px 12px; box-shadow: 0 4px 16px rgba(0,0,0,.15); }
+  .toast.warn { border-left-color: var(--warn); }
+  dialog { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--text); padding: 0; width: min(320px, calc(100vw - 32px)); }
+  dialog form { padding: 16px; }
+  dialog h3 { margin: 0; font-size: 14px; }
+  .dlg-buttons { display: flex; gap: 8px; justify-content: flex-end; }
+  .dlg-buttons button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; }
+  .dlg-buttons button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  .small-btn { font: inherit; font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); cursor: pointer; text-transform: none; letter-spacing: 0; }
+  .filter { width: auto; padding: 2px 6px; font-size: 11px; text-transform: none; letter-spacing: 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>fixgen Order Blaster</h1>
+  <span id="conn">connecting…</span>
+  <div id="sessions"></div>
+</header>
+
+<main>
+  <section aria-label="Order ticket">
+    <h2>Order ticket</h2>
+    <form id="ticket" autocomplete="off">
+      <label>Session
+        <select id="f-session"></select>
+      </label>
+      <div class="hint" id="venue-hint"></div>
+      <div class="sides" id="f-sides"></div>
+      <label><span id="symbol-label">Symbol</span>
+        <input id="f-symbol" required placeholder="e.g. VOD">
+      </label>
+      <div class="row">
+        <label>Quantity <input id="f-qty" required inputmode="decimal" value="100"></label>
+        <label>Type <select id="f-ordtype"></select></label>
+      </div>
+      <div class="row">
+        <label id="price-wrap">Price <input id="f-price" inputmode="decimal" placeholder="0.00"></label>
+        <label>Time in force <select id="f-tif"></select></label>
+      </div>
+      <label id="account-wrap">Account <input id="f-account"></label>
+      <div class="extras" id="f-extras"></div>
+      <div class="row">
+        <label>Count <input id="f-count" type="number" min="1" max="100000" value="1"></label>
+        <label>Rate / sec <input id="f-rate" inputmode="decimal" placeholder="no limit"></label>
+      </div>
+      <div id="ticket-error" role="alert"></div>
+      <button class="send" id="send" type="submit">Send</button>
+    </form>
+  </section>
+
+  <div class="grid-right">
+    <section aria-label="Orders">
+      <h2>Orders <span id="order-count"></span><span class="spacer"></span>
+        <select id="order-filter" class="filter" aria-label="Filter orders">
+          <option value="all">All</option><option value="open">Open</option><option value="done">Done</option>
+        </select>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th>ClOrdID</th><th>Session</th><th>Symbol</th><th>Side</th><th class="num">Qty</th>
+            <th class="num">Price</th><th>Type</th><th>TIF</th><th>Status</th><th class="num">Filled</th>
+            <th class="num">Avg px</th><th>Text</th><th></th>
+          </tr></thead>
+          <tbody id="orders"></tbody>
+        </table>
+        <div class="empty" id="orders-empty">No orders yet.</div>
+      </div>
+    </section>
+
+    <section aria-label="FIX log">
+      <h2>FIX log<span class="spacer"></span>
+        <select id="log-filter" class="filter" aria-label="Filter log"><option value="">All sessions</option></select>
+        <button class="small-btn" id="log-pause" type="button">Pause</button>
+        <button class="small-btn" id="log-clear" type="button">Clear</button>
+      </h2>
+      <pre id="log"></pre>
+    </section>
+  </div>
+</main>
+
+<dialog id="amend">
+  <form method="dialog" id="amend-form">
+    <h3 id="amend-title">Amend order</h3>
+    <label>Quantity <input id="a-qty" inputmode="decimal"></label>
+    <label>Price <input id="a-price" inputmode="decimal"></label>
+    <div id="amend-error" style="color:var(--bad);font-size:12px"></div>
+    <div class="dlg-buttons">
+      <button value="cancel" formnovalidate>Close</button>
+      <button class="primary" value="ok" id="amend-ok">Send replace</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toasts" aria-live="polite"></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const label = (s) => String(s).replace(/_/g, " ");
+const sessions = new Map();   // name -> session json
+const orders = new Map();     // key -> order json
+const DONE = new Set(["filled", "canceled", "rejected", "expired"]);
+let side = "buy";
+let logPaused = false;
+
+function store(key, value) { try { localStorage.setItem("fixgen." + key, value); } catch {} }
+function load(key) { try { return localStorage.getItem("fixgen." + key); } catch { return null; } }
+
+function toast(text, level = "error") {
+  const el = document.createElement("div");
+  el.className = "toast" + (level === "warn" ? " warn" : "");
+  el.textContent = text;
+  $("toasts").appendChild(el);
+  setTimeout(() => el.remove(), 6000);
+}
+
+async function api(path, body) {
+  const res = await fetch(path, body === undefined ? {} : {
+    method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const data = await res.json().catch(() => ({error: res.statusText}));
+  if (!res.ok) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+// ---------------------------------------------------------------- sessions
+function renderSessions() {
+  $("sessions").innerHTML = [...sessions.values()].map((s) => `
+    <span class="pill" title="${esc(s.venue_name)} · ${esc(s.begin_string)} · ${esc(s.endpoint)}${s.last_error ? " · " + esc(s.last_error) : ""}">
+      <span class="dot ${esc(s.state)}"></span>${esc(s.name)} <span style="color:var(--muted)">${esc(label(s.state))}</span>
+      <button data-sess="${esc(s.name)}" data-op="${s.enabled ? "disconnect" : "connect"}">${s.enabled ? "disconnect" : "connect"}</button>
+    </span>`).join("");
+  const sel = $("f-session"), cur = sel.value || load("session");
+  const names = [...sessions.keys()];
+  if (sel.options.length !== names.length) {
+    sel.innerHTML = names.map((n) => `<option value="${esc(n)}">${esc(n)} (${esc(sessions.get(n).venue_name)})</option>`).join("");
+    $("log-filter").innerHTML = `<option value="">All sessions</option>` + names.map((n) => `<option>${esc(n)}</option>`).join("");
+    if (cur && sessions.has(cur)) sel.value = cur;
+    renderTicket();
+  }
+  updateSendButton();
+}
+
+$("sessions").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-sess]");
+  if (!b) return;
+  try { sessions.set(b.dataset.sess, await api(`/api/sessions/${encodeURIComponent(b.dataset.sess)}/${b.dataset.op}`, {})); renderSessions(); }
+  catch (err) { toast(err.message); }
+});
+
+// ---------------------------------------------------------------- ticket
+function current() { return sessions.get($("f-session").value); }
+
+function renderTicket() {
+  const s = current();
+  if (!s) return;
+  const c = s.capabilities;
+  store("session", s.name);
+  $("venue-hint").textContent = `${s.venue_name} · ${s.begin_string} · cancel ${c.cancel ? "yes" : "no"} · amend ${c.replace ? "yes" : "no"}`;
+  if (!c.sides.includes(side)) side = c.sides[0];
+  $("f-sides").innerHTML = c.sides.map((x) =>
+    `<button type="button" data-side="${x}" class="${x === "buy" ? "buy" : "sell"} ${x === side ? "on" : ""}">${esc(label(x))}</button>`).join("");
+  const ot = $("f-ordtype").value;
+  $("f-ordtype").innerHTML = c.ord_types.map((x) => `<option value="${x}">${esc(label(x))}</option>`).join("");
+  $("f-ordtype").value = c.ord_types.includes(ot) ? ot : (c.ord_types.includes("limit") ? "limit" : c.ord_types[0]);
+  const tif = $("f-tif").value;
+  $("f-tif").innerHTML = `<option value="">venue default</option>` + c.tifs.map((x) => `<option value="${x}">${esc(label(x).toUpperCase())}</option>`).join("");
+  if (c.tifs.includes(tif)) $("f-tif").value = tif;
+  $("symbol-label").textContent = c.instrument_field === "Symbol" ? "Symbol" : `Instrument (${c.instrument_field})`;
+  $("account-wrap").style.display = c.has_account ? "" : "none";
+  $("account-wrap").firstChild.textContent = c.account_required ? "Account *" : "Account";
+  $("f-extras").innerHTML = c.extras.map((x) => {
+    const id = "x-" + x.name;
+    const input = x.values.length
+      ? `<select id="${esc(id)}" data-extra="${esc(x.name)}">${x.required ? "" : `<option value="">(not set)</option>`}${
+          x.values.map((v) => `<option value="${esc(v.value)}">${esc(v.name)} (${esc(v.value)})</option>`).join("")}</select>`
+      : `<input id="${esc(id)}" data-extra="${esc(x.name)}" ${x.required ? "required" : ""}>`;
+    return `<label title="${esc(x.description)}">${esc(x.name)} · tag ${x.tag}${x.required ? ' <span class="req">*</span>' : ""}${input}</label>`;
+  }).join("");
+  syncPrice();
+}
+
+function syncPrice() {
+  const t = $("f-ordtype").value;
+  $("price-wrap").style.visibility = (t === "market" || t === "stop") ? "hidden" : "visible";
+}
+
+function updateSendButton() {
+  const s = current();
+  const n = Math.max(1, parseInt($("f-count").value, 10) || 1);
+  $("send").textContent = n > 1 ? `Blast ${n.toLocaleString()} ${label(side)} orders` : `Send ${label(side)}`;
+  $("send").disabled = !s || s.state !== "active";
+  if (s && s.state !== "active") $("send").textContent = `${s.name} is ${label(s.state)}`;
+}
+
+$("f-session").addEventListener("change", renderTicket);
+$("f-ordtype").addEventListener("change", syncPrice);
+$("f-count").addEventListener("input", updateSendButton);
+$("f-sides").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-side]");
+  if (!b) return;
+  side = b.dataset.side;
+  for (const x of $("f-sides").children) x.classList.toggle("on", x === b);
+  updateSendButton();
+});
+
+$("ticket").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("ticket-error").textContent = "";
+  const s = current();
+  const extra = {};
+  for (const el of $("f-extras").querySelectorAll("[data-extra]")) if (el.value) extra[el.dataset.extra] = el.value;
+  const body = {
+    session: s.name, symbol: $("f-symbol").value.trim(), side, qty: $("f-qty").value.trim(),
+    ord_type: $("f-ordtype").value, price: $("f-price").value.trim(), tif: $("f-tif").value,
+    account: $("f-account").value.trim(), extra, count: parseInt($("f-count").value, 10) || 1,
+  };
+  if ($("f-rate").value.trim()) body.rate_per_sec = $("f-rate").value.trim();
+  if (body.ord_type === "market" || body.ord_type === "stop") delete body.price;
+  store("symbol", body.symbol);
+  $("send").disabled = true;
+  try { await api("/api/orders", body); }
+  catch (err) { $("ticket-error").textContent = err.message; }
+  finally { updateSendButton(); }
+});
+
+// ---------------------------------------------------------------- orders
+let renderQueued = false;
+function scheduleOrders() {
+  if (renderQueued) return;
+  renderQueued = true;
+  requestAnimationFrame(() => { renderQueued = false; renderOrders(); });
+}
+
+function renderOrders() {
+  const filter = $("order-filter").value;
+  let list = [...orders.values()].reverse();
+  if (filter === "open") list = list.filter((o) => !DONE.has(o.status));
+  if (filter === "done") list = list.filter((o) => DONE.has(o.status));
+  const shown = list.slice(0, 500);
+  $("order-count").textContent = `· ${orders.size.toLocaleString()}${list.length > shown.length ? ` (showing ${shown.length})` : ""}`;
+  $("orders-empty").style.display = orders.size ? "none" : "";
+  $("orders").innerHTML = shown.map((o) => {
+    const s = sessions.get(o.session);
+    const open = !DONE.has(o.status) && !o.pending;
+    const warn = o.warnings.length ? ` <span class="warn-flag" title="${esc(o.warnings.join("\n"))}">⚠</span>` : "";
+    return `<tr>
+      <td>${esc(o.key)}${o.cl_ord_id !== o.key ? `<div class="hint">→ ${esc(o.cl_ord_id)}</div>` : ""}</td>
+      <td>${esc(o.session)}</td><td>${esc(o.symbol)}</td><td class="${esc(o.side)}">${esc(label(o.side))}</td>
+      <td class="num">${esc(o.qty)}</td><td class="num">${esc(o.price)}</td><td>${esc(label(o.ord_type))}</td>
+      <td>${esc(o.tif.toUpperCase())}</td>
+      <td><span class="status ${esc(o.status)}">${esc(label(o.status))}${o.pending ? " · " + esc(o.pending) + "…" : ""}</span>${warn}</td>
+      <td class="num">${esc(o.cum_qty)}</td><td class="num">${esc(o.avg_px)}</td><td class="text">${esc(o.text)}</td>
+      <td class="actions">
+        <button data-key="${esc(o.key)}" data-op="cancel" ${open && s?.capabilities.cancel ? "" : "disabled"}>Cancel</button>
+        <button data-key="${esc(o.key)}" data-op="amend" ${open && s?.capabilities.replace ? "" : "disabled"}>Amend</button>
+      </td></tr>`;
+  }).join("");
+}
+
+$("order-filter").addEventListener("change", renderOrders);
+$("orders").addEventListener("click", async (e) => {
+  const b = e.target.closest("button[data-op]");
+  if (!b) return;
+  const o = orders.get(b.dataset.key);
+  if (b.dataset.op === "cancel") {
+    try { await api(`/api/orders/${encodeURIComponent(o.key)}/cancel`, {}); } catch (err) { toast(err.message); }
+    return;
+  }
+  $("amend-title").textContent = `Amend ${o.key} · ${o.symbol}`;
+  $("a-qty").value = o.qty;
+  $("a-price").value = o.price;
+  $("amend-error").textContent = "";
+  $("amend").dataset.key = o.key;
+  $("amend").showModal();
+});
+
+$("amend-ok").addEventListener("click", async (e) => {
+  e.preventDefault();
+  const key = $("amend").dataset.key;
+  try {
+    await api(`/api/orders/${encodeURIComponent(key)}/replace`, {qty: $("a-qty").value.trim(), price: $("a-price").value.trim()});
+    $("amend").close();
+  } catch (err) { $("amend-error").textContent = err.message; }
+});
+
+// ---------------------------------------------------------------- FIX log
+function addLog(entry) {
+  if (logPaused) return;
+  const f = $("log-filter").value;
+  if (f && entry.session !== f) return;
+  const log = $("log");
+  const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 30;
+  const line = document.createElement("div");
+  line.className = "line";
+  line.innerHTML = `<span class="${entry.dir}">${entry.dir === "out" ? "→" : "←"}</span> <span class="sess">${esc(entry.session)}</span> ${esc(entry.msg)}`;
+  log.appendChild(line);
+  while (log.childElementCount > 1000) log.firstChild.remove();
+  if (atBottom) log.scrollTop = log.scrollHeight;
+}
+$("log-pause").addEventListener("click", () => { logPaused = !logPaused; $("log-pause").textContent = logPaused ? "Resume" : "Pause"; });
+$("log-clear").addEventListener("click", () => { $("log").innerHTML = ""; });
+$("log-filter").addEventListener("change", () => { $("log").innerHTML = ""; });
+
+// ---------------------------------------------------------------- live updates
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onopen = () => { $("conn").textContent = "live"; };
+  es.onerror = () => { $("conn").textContent = "gateway unreachable, retrying…"; };
+  es.addEventListener("session", (e) => { const s = JSON.parse(e.data); sessions.set(s.name, s); renderSessions(); scheduleOrders(); });
+  es.addEventListener("order", (e) => { const o = JSON.parse(e.data); orders.set(o.key, o); scheduleOrders(); });
+  es.addEventListener("fix", (e) => addLog(JSON.parse(e.data)));
+  es.addEventListener("notice", (e) => { const n = JSON.parse(e.data); toast(`${n.session}: ${n.text}`, n.level); });
+}
+
+$("f-symbol").value = load("symbol") || "";
+connect();
+</script>
+</body>
+</html>

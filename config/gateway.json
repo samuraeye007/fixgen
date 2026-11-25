@@ -1,0 +1,19 @@
+{
+  "http": {"host": "127.0.0.1", "port": 8080, "ui_dir": "ui"},
+  "sessions": [
+    {
+      "name": "demo",
+      "venue": "demo_exch",
+      "host": "127.0.0.1", "port": 9878,
+      "sender_comp_id": "BLASTER", "target_comp_id": "SIM",
+      "credentials": {"username": "trader1", "password": "${DEMO_PASSWORD}"}
+    },
+    {
+      "name": "acme",
+      "venue": "acme_mtf",
+      "host": "127.0.0.1", "port": 9879,
+      "sender_comp_id": "BLASTER", "target_comp_id": "SIM",
+      "credentials": {"username": "trader1", "password": "${ACME_PASSWORD}", "member_code": "MBR042"}
+    }
+  ]
+}

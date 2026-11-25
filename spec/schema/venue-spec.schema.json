@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fixgen.local/venue-spec.schema.json",
+  "title": "fixgen venue spec",
+  "description": "Standardised description of one venue's FIX order-entry interface. Produced by specgen (from a PDF) or by hand; consumed by codegen.",
+  "type": "object",
+  "required": ["spec_version", "venue", "session", "fields", "messages", "order_entry"],
+  "additionalProperties": false,
+  "$defs": {
+    "ident": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9_]*$"},
+    "fixValue": {"type": "string", "minLength": 1, "pattern": "^[^\\u0001=]+$"},
+    "valueMap": {"type": "object", "additionalProperties": {"$ref": "#/$defs/fixValue"}},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pages": {"type": "array", "items": {"type": "integer"}},
+        "quote": {"type": "string"}
+      }
+    }
+  },
+  "properties": {
+    "spec_version": {"const": 1},
+    "venue": {
+      "type": "object",
+      "required": ["id", "name"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+        "name": {"type": "string"},
+        "description": {"type": "string"},
+        "source": {"type": "object", "additionalProperties": {"type": "string"}}
+      }
+    },
+    "session": {
+      "type": "object",
+      "required": ["begin_string"],
+      "additionalProperties": false,
+      "properties": {
+        "begin_string": {"enum": ["FIX.4.2", "FIX.4.3", "FIX.4.4", "FIXT.1.1"]},
+        "default_appl_ver_id": {"type": "string"},
+        "heartbeat_interval": {"type": "integer", "minimum": 1},
+        "reset_seq_num_on_logon": {"type": "boolean"},
+        "logon_fields": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["field"],
+            "additionalProperties": false,
+            "properties": {
+              "field": {"$ref": "#/$defs/ident"},
+              "from": {"type": "string", "pattern": "^credential\\.[a-z_]+$"},
+              "value": {"$ref": "#/$defs/fixValue"}
+            },
+            "oneOf": [{"required": ["from"]}, {"required": ["value"]}]
+          }
+        }
+      }
+    },
+    "fields": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["tag", "name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "tag": {"type": "integer", "minimum": 1},
+          "name": {"$ref": "#/$defs/ident"},
+          "type": {"enum": ["STRING", "CHAR", "INT", "SEQNUM", "NUMINGROUP", "LENGTH", "QTY", "PRICE", "PRICEOFFSET", "AMT", "FLOAT", "PERCENTAGE", "BOOLEAN", "UTCTIMESTAMP", "UTCDATEONLY", "UTCTIMEONLY", "LOCALMKTDATE", "MONTHYEAR", "CURRENCY", "EXCHANGE", "MULTIPLEVALUESTRING", "DATA"]},
+          "custom": {"type": "boolean"},
+          "description": {"type": "string"},
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["value", "name"],
+              "additionalProperties": false,
+              "properties": {
+                "value": {"$ref": "#/$defs/fixValue"},
+                "name": {"$ref": "#/$defs/ident"},
+                "description": {"type": "string"}
+              }
+            }
+          },
+          "source": {"$ref": "#/$defs/source"}
+        }
+      }
+    },
+    "messages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["msg_type", "name", "direction", "fields"],
+        "additionalProperties": false,
+        "properties": {
+          "msg_type": {"type": "string", "pattern": "^[0-9A-Za-z]{1,4}$"},
+          "name": {"$ref": "#/$defs/ident"},
+          "direction": {"enum": ["to_venue", "from_venue", "both"]},
+          "description": {"type": "string"},
+          "fields": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["field"],
+              "additionalProperties": false,
+              "properties": {
+                "field": {"$ref": "#/$defs/ident"},
+                "required": {"type": "boolean"},
+                "required_when": {
+                  "type": "object",
+                  "description": "Field is required when ANY listed field has one of the listed values.",
+                  "additionalProperties": {"type": "array", "items": {"$ref": "#/$defs/fixValue"}}
+                },
+                "note": {"type": "string"}
+              }
+            }
+          },
+          "source": {"$ref": "#/$defs/source"}
+        }
+      }
+    },
+    "order_entry": {
+      "type": "object",
+      "required": ["instrument", "side", "ord_type", "exec_type", "ord_status"],
+      "additionalProperties": false,
+      "properties": {
+        "instrument": {
+          "type": "object",
+          "required": ["field"],
+          "additionalProperties": false,
+          "properties": {
+            "field": {"$ref": "#/$defs/ident"},
+            "extra": {"$ref": "#/$defs/valueMap"}
+          }
+        },
+        "account": {
+          "type": "object",
+          "required": ["field"],
+          "additionalProperties": false,
+          "properties": {"field": {"$ref": "#/$defs/ident"}, "required": {"type": "boolean"}}
+        },
+        "side": {"type": "object", "minProperties": 1, "additionalProperties": false,
+          "properties": {"buy": {"$ref": "#/$defs/fixValue"}, "sell": {"$ref": "#/$defs/fixValue"}, "sell_short": {"$ref": "#/$defs/fixValue"}, "sell_short_exempt": {"$ref": "#/$defs/fixValue"}}},
+        "ord_type": {"type": "object", "minProperties": 1, "additionalProperties": false,
+          "properties": {"market": {"$ref": "#/$defs/fixValue"}, "limit": {"$ref": "#/$defs/fixValue"}, "stop": {"$ref": "#/$defs/fixValue"}, "stop_limit": {"$ref": "#/$defs/fixValue"}}},
+        "time_in_force": {"type": "object", "additionalProperties": false,
+          "properties": {"day": {"$ref": "#/$defs/fixValue"}, "gtc": {"$ref": "#/$defs/fixValue"}, "ioc": {"$ref": "#/$defs/fixValue"}, "fok": {"$ref": "#/$defs/fixValue"}, "gtd": {"$ref": "#/$defs/fixValue"}, "at_open": {"$ref": "#/$defs/fixValue"}, "at_close": {"$ref": "#/$defs/fixValue"}}},
+        "defaults": {"$ref": "#/$defs/valueMap"},
+        "cancel": {"type": "boolean"},
+        "replace": {"type": "boolean"},
+        "exec_type": {"type": "object", "additionalProperties": false,
+          "properties": {"new": {"$ref": "#/$defs/fixValue"}, "partial_fill": {"$ref": "#/$defs/fixValue"}, "fill": {"$ref": "#/$defs/fixValue"}, "trade": {"$ref": "#/$defs/fixValue"}, "canceled": {"$ref": "#/$defs/fixValue"}, "replaced": {"$ref": "#/$defs/fixValue"}, "rejected": {"$ref": "#/$defs/fixValue"}, "expired": {"$ref": "#/$defs/fixValue"}, "pending_new": {"$ref": "#/$defs/fixValue"}, "pending_cancel": {"$ref": "#/$defs/fixValue"}, "pending_replace": {"$ref": "#/$defs/fixValue"}, "restated": {"$ref": "#/$defs/fixValue"}}},
+        "ord_status": {"type": "object", "additionalProperties": false,
+          "properties": {"new": {"$ref": "#/$defs/fixValue"}, "partially_filled": {"$ref": "#/$defs/fixValue"}, "filled": {"$ref": "#/$defs/fixValue"}, "canceled": {"$ref": "#/$defs/fixValue"}, "replaced": {"$ref": "#/$defs/fixValue"}, "rejected": {"$ref": "#/$defs/fixValue"}, "expired": {"$ref": "#/$defs/fixValue"}, "pending_new": {"$ref": "#/$defs/fixValue"}, "pending_cancel": {"$ref": "#/$defs/fixValue"}, "pending_replace": {"$ref": "#/$defs/fixValue"}}}
+      }
+    }
+  }
+}

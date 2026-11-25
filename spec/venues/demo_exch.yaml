@@ -1,0 +1,132 @@
+# Hand-written reference spec. A specgen run against a real PDF produces a file
+# in exactly this shape (plus a review report) for a human to check and commit.
+spec_version: 1
+venue:
+  id: demo_exch
+  name: Demo Exchange
+  description: Fictional FIX 4.4 cash equities venue used for tests and as a template.
+  source: {document: "Demo Exchange FIX 4.4 Order Entry Spec", version: "1.0"}
+
+session:
+  begin_string: FIX.4.4
+  heartbeat_interval: 30
+  reset_seq_num_on_logon: true
+  logon_fields:
+    - {field: Username, from: credential.username}
+    - {field: Password, from: credential.password}
+
+fields:
+  - {tag: 1,    name: Account,      type: STRING}
+  - {tag: 6,    name: AvgPx,        type: PRICE}
+  - {tag: 11,   name: ClOrdID,      type: STRING}
+  - {tag: 14,   name: CumQty,       type: QTY}
+  - {tag: 17,   name: ExecID,       type: STRING}
+  - {tag: 21,   name: HandlInst,    type: CHAR, values: [{value: "1", name: AutomatedNoIntervention}]}
+  - {tag: 31,   name: LastPx,       type: PRICE}
+  - {tag: 32,   name: LastQty,      type: QTY}
+  - {tag: 37,   name: OrderID,      type: STRING}
+  - {tag: 38,   name: OrderQty,     type: QTY}
+  - {tag: 39,   name: OrdStatus,    type: CHAR, values: [
+        {value: "0", name: New}, {value: "1", name: PartiallyFilled}, {value: "2", name: Filled},
+        {value: "4", name: Canceled}, {value: "8", name: Rejected}, {value: "A", name: PendingNew}]}
+  - {tag: 40,   name: OrdType,      type: CHAR, values: [{value: "1", name: Market}, {value: "2", name: Limit}]}
+  - {tag: 41,   name: OrigClOrdID,  type: STRING}
+  - {tag: 44,   name: Price,        type: PRICE}
+  - {tag: 54,   name: Side,         type: CHAR, values: [{value: "1", name: Buy}, {value: "2", name: Sell}, {value: "5", name: SellShort}]}
+  - {tag: 55,   name: Symbol,       type: STRING}
+  - {tag: 58,   name: Text,         type: STRING}
+  - {tag: 59,   name: TimeInForce,  type: CHAR, values: [{value: "0", name: Day}, {value: "3", name: ImmediateOrCancel}, {value: "4", name: FillOrKill}]}
+  - {tag: 60,   name: TransactTime, type: UTCTIMESTAMP}
+  - {tag: 103,  name: OrdRejReason, type: INT}
+  - {tag: 150,  name: ExecType,     type: CHAR, values: [
+        {value: "0", name: New}, {value: "4", name: Canceled}, {value: "5", name: Replaced},
+        {value: "8", name: Rejected}, {value: "F", name: Trade}]}
+  - {tag: 151,  name: LeavesQty,    type: QTY}
+  - {tag: 434,  name: CxlRejResponseTo, type: CHAR, values: [{value: "1", name: OrderCancelRequest}, {value: "2", name: OrderCancelReplaceRequest}]}
+  - {tag: 553,  name: Username,     type: STRING}
+  - {tag: 554,  name: Password,     type: STRING}
+
+messages:
+  - msg_type: D
+    name: NewOrderSingle
+    direction: to_venue
+    fields:
+      - {field: ClOrdID, required: true}
+      - {field: Account, required: false}
+      - {field: HandlInst, required: true}
+      - {field: Symbol, required: true}
+      - {field: Side, required: true}
+      - {field: TransactTime, required: true}
+      - {field: OrderQty, required: true}
+      - {field: OrdType, required: true}
+      - {field: Price, required_when: {OrdType: ["2"]}}
+      - {field: TimeInForce, required: false}
+  - msg_type: F
+    name: OrderCancelRequest
+    direction: to_venue
+    fields:
+      - {field: OrigClOrdID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: Symbol, required: true}
+      - {field: Side, required: true}
+      - {field: TransactTime, required: true}
+      - {field: OrderQty, required: true}
+  - msg_type: G
+    name: OrderCancelReplaceRequest
+    direction: to_venue
+    fields:
+      - {field: OrigClOrdID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: Account, required: false}
+      - {field: HandlInst, required: true}
+      - {field: Symbol, required: true}
+      - {field: Side, required: true}
+      - {field: TransactTime, required: true}
+      - {field: OrderQty, required: true}
+      - {field: OrdType, required: true}
+      - {field: Price, required_when: {OrdType: ["2"]}}
+      - {field: TimeInForce, required: false}
+  - msg_type: "8"
+    name: ExecutionReport
+    direction: from_venue
+    fields:
+      - {field: OrderID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: OrigClOrdID, required: false}
+      - {field: ExecID, required: true}
+      - {field: ExecType, required: true}
+      - {field: OrdStatus, required: true}
+      - {field: Symbol, required: true}
+      - {field: Side, required: true}
+      - {field: OrderQty, required: false}
+      - {field: Price, required: false}
+      - {field: LastQty, required: false}
+      - {field: LastPx, required: false}
+      - {field: LeavesQty, required: true}
+      - {field: CumQty, required: true}
+      - {field: AvgPx, required: true}
+      - {field: OrdRejReason, required: false}
+      - {field: Text, required: false}
+  - msg_type: "9"
+    name: OrderCancelReject
+    direction: from_venue
+    fields:
+      - {field: OrderID, required: true}
+      - {field: ClOrdID, required: true}
+      - {field: OrigClOrdID, required: true}
+      - {field: OrdStatus, required: true}
+      - {field: CxlRejResponseTo, required: true}
+      - {field: Text, required: false}
+
+# How the core's normalized order model maps onto this venue.
+order_entry:
+  instrument: {field: Symbol}
+  account: {field: Account, required: false}
+  side: {buy: "1", sell: "2", sell_short: "5"}
+  ord_type: {market: "1", limit: "2"}
+  time_in_force: {day: "0", ioc: "3", fok: "4"}
+  defaults: {HandlInst: "1"}
+  cancel: true
+  replace: true
+  exec_type: {new: "0", canceled: "4", replaced: "5", rejected: "8", trade: "F"}
+  ord_status: {new: "0", partially_filled: "1", filled: "2", canceled: "4", rejected: "8", pending_new: "A"}
