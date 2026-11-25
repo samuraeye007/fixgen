@@ -77,3 +77,27 @@ def test_codegen_refuses_invalid_spec(tmp_path):
     p.write_text(yaml.safe_dump(s))
     with pytest.raises(SpecError):
         generate([p], tmp_path / "out")
+
+
+def test_quickfix_dictionaries(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    generate(SPECS, tmp_path)
+    d = tmp_path / "dict"
+    assert {p.name for p in d.iterdir()} == {"demo_exch.xml", "acme_mtf.xml", "acme_mtf.transport.xml"}
+
+    demo = ET.parse(d / "demo_exch.xml").getroot()
+    assert (demo.get("type"), demo.get("major"), demo.get("minor")) == ("FIX", "4", "4")
+    msgs = {m.get("msgtype"): m for m in demo.iter("message")}
+    assert {"0", "1", "2", "3", "4", "5", "A", "D", "F", "G", "8", "9"} <= set(msgs)
+    logon_fields = {f.get("name") for f in msgs["A"]}
+    assert {"Username", "Password"} <= logon_fields
+    # Lenient by design: no required app fields, no enum lists.
+    assert all(f.get("required") == "N" for f in msgs["8"])
+    assert not list(demo.iter("value"))
+
+    transport = ET.parse(d / "acme_mtf.transport.xml").getroot()
+    app = ET.parse(d / "acme_mtf.xml").getroot()
+    assert transport.get("type") == "FIXT" and app.get("servicepack") == "2"
+    assert {m.get("msgtype") for m in app.iter("message")} == {"D", "F", "8", "9"}
+    assert "MemberCode" in {f.get("name") for f in transport.find("fields")}

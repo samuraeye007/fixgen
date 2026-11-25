@@ -76,3 +76,6 @@ __pycache__/
 
 # specgen working output
 specgen-out/
+
+# QuickFIX message stores
+var/

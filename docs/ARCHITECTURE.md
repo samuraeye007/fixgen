@@ -13,6 +13,9 @@ Most of what makes venues different on the wire is data, not logic:
 
 fixgen captures that data in one standardised file per venue and generates C++ tables
 from it. A single, well-tested engine (`fixcore::SpecAdapter`) interprets those tables.
+The FIX session layer is not ours: it is [QuickFIX](https://github.com/quickfix/quickfix),
+pinned to v1.16.0. The hand-written engine from the first version is in git history under
+the `custom-fix-engine` tag.
 The LLM's only job is to read the PDF and produce a first draft of that file. A person
 reviews the draft before anything gets compiled.
 
@@ -68,23 +71,46 @@ For each spec, codegen emits two files:
 - `<id>.cpp`: constexpr tables for the `Dictionary` (fields, enums, message rules) and
   the `VenueProfile` (mappings).
 
-It also emits `registry.cpp`, which defines `make_all_venues()`. CMake runs codegen
-whenever a spec, a template or the schema changes.
+It also emits:
+- `registry.cpp`, which defines `make_all_venues()`.
+- `dict/<id>.xml`, the QuickFIX data dictionary. FIXT venues also get
+  `dict/<id>.transport.xml`.
+
+CMake runs codegen whenever a spec, a template or the schema changes.
+
+**Why the QuickFIX dictionaries are lenient.** QuickFIX validates only *incoming*
+messages. When one fails, QuickFIX answers with a session Reject and never passes the
+message to the application. A strict dictionary would therefore silently drop an
+ExecutionReport whose value our spec missed, and that order would disappear from your
+books. So the generated dictionaries define message layouts and field types only: no
+required flags on application messages, no enum lists, and unknown fields allowed. The
+strict checks stay in `fixcore::Dictionary`:
+- Outbound, it blocks anything that breaks the venue's spec before it reaches the wire.
+- Inbound, it turns deviations into warnings on the order instead of dropping the message.
 
 The generated code is deliberately data, not logic. Behaviour lives in `SpecAdapter` and
 `Dictionary::validate`, which are tested once rather than once per venue. When a venue
 has a quirk the spec cannot express, subclass `SpecAdapter`, override the hook, and
 register the subclass. Don't add a special case to the templates.
 
-### 3. Core: `core/`
+### 3. Core: `core/` and the QuickFIX bridge: `core/qf/`
+
+`fixcore` has no QuickFIX dependency, so adapters can be unit-tested without a session.
 
 | File | Contents |
 |---|---|
-| `message`, `codec` | Ordered tag=value message (repeating groups preserved by order), encoding with BodyLength and CheckSum, decoding, and a stream `FrameParser` |
-| `session` | FIX session state machine for initiator and acceptor. Covers logon and logout, heartbeat and TestRequest, sequence checks, gap detection with ResendRequest, resend with PossDupFlag, and gap fill of admin messages. It is transport-agnostic: feed it bytes and it calls back with bytes |
+| `message`, `codec` | Ordered tag=value message (repeating groups preserved by order), encoding with BodyLength and CheckSum, and decoding. Used in tests and as the adapters' message model |
+| `qf/bridge` | Converts between `fixcore::Message` and `FIX::Message`, and builds QuickFIX session settings from the venue spec (BeginString, dictionaries, ResetOnLogon, heartbeat). Also a `LogFactory` that streams raw FIX and session events to the UI, with credentials masked |
 | `dictionary` | Validates a message against the venue's rules: required and conditional fields, enum values, type syntax, and fields the venue does not accept |
 | `spec_adapter` | Normalized `NewOrder` / `CancelOrder` / `ReplaceOrder` → venue FIX, ExecutionReport / OrderCancelReject → `ExecEvent`. It returns a precise error when the venue cannot do what was asked (for example "ACME MTF does not support market orders") |
-| `net`, `json` | A poll() reactor, non-blocking TCP and a small JSON library. No third-party dependencies |
+| `net`, `json` | A poll() reactor and a small JSON library, used by the gateway's HTTP server |
+
+QuickFIX provides:
+- logon, heartbeats and TestRequest
+- sequence checks, ResendRequest and gap fill
+- a FileStore that persists sequence numbers and sent messages for resend
+- reconnects
+- the session schedule
 
 Every outbound message is validated against the venue dictionary before it is sent, and
 every inbound execution is validated too. When the venue deviates from its own spec, the
@@ -92,8 +118,16 @@ deviation shows up as a warning on the order in the UI.
 
 ### 4. Gateway and Order Blaster: `gateway/`, `ui/`
 
-`fixgen-gateway` runs one initiator session per configured venue and reconnects
-automatically. It tracks orders across cancel/replace chains, keyed by the first
+`fixgen-gateway` runs one QuickFIX `SocketInitiator` session per configured venue.
+QuickFIX handles reconnects, and the message store lives in `store_dir` (default
+`var/fixstore`).
+
+Everything runs on one thread. The reactor serves HTTP and calls
+`SocketInitiator::poll()` every 2 ms, which is QuickFIX's non-blocking single-thread
+mode. So QuickFIX callbacks never race the API handlers, and no locks are needed. The
+cost is up to about 2 ms of added latency on inbound messages, which is fine for this
+use. Moving to `ThreadedSocketInitiator` plus a queue is the upgrade path if that ever
+matters. It tracks orders across cancel/replace chains, keyed by the first
 ClOrdID. It also serves the UI and a JSON/SSE API.
 
 Blasting sends up to 1,000 orders inline. Larger blasts, or any blast with
@@ -111,10 +145,11 @@ Not a real one. What you need to test splits into three layers:
 | Layer | What tests it | Built? |
 |---|---|---|
 | Codec, session, translation logic | Unit tests (`fixcore_tests`), including gap-fill, resend and heartbeat-timeout scenarios | Yes |
-| The whole system over sockets: UI/API → gateway → FIX → back | `fixgen-sim`, a thin acceptor that reuses the core's session layer and the venue's own generated dictionary. Acks, fills (immediate or partial), cancels, replaces, rejects | Yes |
+| The whole system over sockets: UI/API → gateway → FIX → back | `fixgen-sim`, a thin QuickFIX acceptor that validates against the venue's generated dictionary. Acks, fills (immediate or partial), cancels, replaces, rejects | Yes |
 | "Our spec matches the real venue" | The venue's UAT / certification environment, then golden-message tests from the PDF's sample messages and recorded UAT sessions | Process, not code |
 
-The sim cost almost nothing to build because it is the core running as an acceptor. Keep
+The sim cost almost nothing to build because it is QuickFIX's acceptor plus our venue
+adapters. Keep
 its limit in mind: it shares the spec with the gateway, so it **cannot catch a wrong
 spec**. If the spec says Price is optional and the real venue requires it, both sides
 agree with each other and the test passes.
@@ -131,9 +166,9 @@ Cheap ways to strengthen the middle layer later:
   adapter produces equivalent ones.
 - **Replay.** Record UAT sessions and replay the venue side through the sim, so
   regression tests use real venue behaviour.
-- **Independent counterparty.** Point the gateway at QuickFIX/J's `Executor` example with
-  the venue's dictionary. The two implementations share no code, which catches
-  session-layer bugs that a self-consistent pair would miss.
+- **Independent counterparty.** Point the gateway at QuickFIX/J's `Executor` example.
+  Both ends currently run QuickFIX C++, and a different implementation would catch
+  interoperability issues that a matched pair hides.
 
 ## Specgen: `tools/fixgen/specgen/`
 
@@ -183,13 +218,15 @@ Repeating groups (Parties and similar) are not modelled yet. See the roadmap.
 
 Roughly in priority order:
 
-1. **Sequence-number persistence.** Sequence numbers live in memory only. That is fine
-   for venues that reset on logon, but not for 24h sessions. Add a file-backed store
-   and a resend store.
-2. **TLS.** Many venues require TLS (or a VPN or leased line). Add OpenSSL to `net`, or
-   front the connection with stunnel for now.
+1. **TLS.** Many venues require TLS (or a VPN or leased line). QuickFIX supports it when
+   built with `HAVE_SSL=ON`. What's missing is the wiring: a `tls` flag per session that
+   selects `SSLSocketInitiator`, plus certificate settings in `config/gateway.json`.
+2. **Session schedules.** Every session is currently `NonStopSession`. Venues with daily
+   sessions need `StartTime`/`EndTime` in the spec or config.
 3. **Repeating groups in the spec** (Parties, NoPartyIDs), with group-aware validation
-   and adapter support. Many MiFID II venues need these for short codes.
+   and adapter support. Many MiFID II venues need these for short codes. Both the
+   QuickFIX dictionaries and the bridge (which flattens groups today) need to learn
+   about them.
 4. **Orchestra / QuickFIX XML import**, so a venue's published dictionary can skip
    specgen, and an Orchestra export.
 5. **Golden-message tests** from PDF examples and recorded UAT sessions.

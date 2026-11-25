@@ -107,35 +107,6 @@ std::optional<Message> decode(std::string_view frame, std::string* error) {
     return msg;
 }
 
-std::optional<std::string> FrameParser::next_frame(std::string* error) {
-    auto start = buf_.find("8=");
-    if (start == std::string::npos) {
-        if (buf_.size() > 1) buf_.erase(0, buf_.size() - 1);  // keep a possible trailing '8'
-        return std::nullopt;
-    }
-    if (start > 0) buf_.erase(0, start);
-    auto len_pos = buf_.find(std::string(1, SOH) + "9=");
-    if (len_pos == std::string::npos) return std::nullopt;
-    auto len_end = buf_.find(SOH, len_pos + 3);
-    if (len_end == std::string::npos) return std::nullopt;
-    long body_len = std::strtol(buf_.c_str() + len_pos + 3, nullptr, 10);
-    if (body_len <= 0 || body_len > 1 << 20) {
-        set_error(error, "invalid BodyLength");
-        buf_.erase(0, 2);  // skip this "8=" and resync
-        return std::string();
-    }
-    std::size_t total = len_end + 1 + body_len + 7;  // "10=xxx<SOH>"
-    if (buf_.size() < total) return std::nullopt;
-    if (buf_.compare(len_end + 1 + body_len, 3, "10=") != 0 || buf_[total - 1] != SOH) {
-        set_error(error, "frame does not end with a checksum where BodyLength says");
-        buf_.erase(0, 2);
-        return std::string();
-    }
-    std::string frame = buf_.substr(0, total);
-    buf_.erase(0, total);
-    return frame;
-}
-
 std::string soh(std::string_view s, char sep) {
     std::string out(s);
     for (auto& c : out)

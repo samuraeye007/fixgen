@@ -65,8 +65,6 @@ private:
 
 // Returns a listening fd or -1 (err set).
 int tcp_listen(const std::string& host, int port, std::string* err = nullptr);
-// Blocking connect with timeout; returns a non-blocking fd or -1.
-int tcp_connect(const std::string& host, int port, int timeout_ms, std::string* err = nullptr);
 // Accept one pending connection (non-blocking fd) or -1.
 int tcp_accept(int listen_fd, std::string* peer = nullptr);
 void close_fd(int fd);

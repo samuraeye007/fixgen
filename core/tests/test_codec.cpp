@@ -28,23 +28,6 @@ TEST(decode_rejects_bad_checksum_and_length) {
     CHECK(!decode(soh("8=FIX.4.4|9=99|35=0|10=000|"), &err));
 }
 
-TEST(frame_parser_handles_split_and_concatenated_frames) {
-    std::string a = encode(Message("0"), "FIX.4.4");
-    Message b_msg("1");
-    b_msg.set(112, "T");
-    std::string b = encode(b_msg, "FIX.4.4");
-    std::string stream = "junk" + a + b;
-    FrameParser p;
-    std::vector<std::string> frames;
-    for (char c : stream) {  // one byte at a time
-        p.feed(std::string_view(&c, 1));
-        while (auto f = p.next_frame()) frames.push_back(*f);
-    }
-    CHECK_EQ(frames.size(), 2u);
-    CHECK_EQ(frames[0], a);
-    CHECK_EQ(frames[1], b);
-}
-
 TEST(repeating_groups_keep_order) {
     Message m("D");
     m.set(453, "2").add(448, "P1").add(452, "3").add(448, "P2").add(452, "12");

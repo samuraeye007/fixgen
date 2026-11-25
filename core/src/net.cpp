@@ -4,7 +4,6 @@
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
-#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -172,44 +171,6 @@ int tcp_listen(const std::string& host, int port, std::string* err) {
         return -1;
     }
     set_nonblocking(fd);
-    return fd;
-}
-
-int tcp_connect(const std::string& host, int port, int timeout_ms, std::string* err) {
-    addrinfo hints{}, *res = nullptr;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (int rc = ::getaddrinfo(host.c_str(), std::to_string(port).c_str(), &hints, &res); rc != 0) {
-        set_err(err, std::string("resolve: ") + ::gai_strerror(rc));
-        return -1;
-    }
-    int fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    set_nonblocking(fd);
-    int rc = ::connect(fd, res->ai_addr, res->ai_addrlen);
-    ::freeaddrinfo(res);
-    if (rc < 0 && errno != EINPROGRESS) {
-        set_err(err, std::string("connect: ") + std::strerror(errno));
-        ::close(fd);
-        return -1;
-    }
-    if (rc < 0) {
-        pollfd p{fd, POLLOUT, 0};
-        if (::poll(&p, 1, timeout_ms) <= 0) {
-            set_err(err, "connect timeout");
-            ::close(fd);
-            return -1;
-        }
-        int so = 0;
-        socklen_t len = sizeof so;
-        ::getsockopt(fd, SOL_SOCKET, SO_ERROR, &so, &len);
-        if (so != 0) {
-            set_err(err, std::string("connect: ") + std::strerror(so));
-            ::close(fd);
-            return -1;
-        }
-    }
-    int one = 1;
-    ::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     return fd;
 }
 

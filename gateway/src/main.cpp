@@ -1,5 +1,8 @@
-// fixgen-gateway: holds FIX sessions to venues, translates normalized orders through
-// the generated venue adapters, and serves the order-blaster UI + JSON/SSE API.
+// fixgen-gateway: holds FIX sessions to venues (QuickFIX), translates normalized orders
+// through the generated venue adapters, and serves the order-blaster UI + JSON/SSE API.
+//
+// Threading: everything runs on one thread. The reactor drives the HTTP server and calls
+// SocketInitiator::poll() every few milliseconds, so QuickFIX callbacks never race the API.
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -13,12 +16,16 @@
 #include <string>
 #include <vector>
 
+#include "bridge.hpp"
 #include "fixcore/codec.hpp"
 #include "fixcore/json.hpp"
 #include "fixcore/net.hpp"
-#include "fixcore/session.hpp"
 #include "fixcore/venue_adapter.hpp"
 #include "http.hpp"
+#include "quickfix/Application.h"
+#include "quickfix/FileStore.h"
+#include "quickfix/Session.h"
+#include "quickfix/SocketInitiator.h"
 
 using namespace fixcore;
 namespace js = fixcore::json;
@@ -52,15 +59,6 @@ std::string expand_env(const std::string& s) {
     return out + s.substr(last);
 }
 
-// Hide credentials in anything we log or stream to the UI.
-std::string redact(std::string raw) {
-    static const std::regex re("(^|\x01)(554|925|20010)=[^\x01]*");
-    raw = std::regex_replace(raw, re, "$1$2=***");
-    for (auto& c : raw)
-        if (c == SOH) c = '|';
-    return raw;
-}
-
 Response json_response(int status, const js::Value& v) { return {status, "application/json", v.dump()}; }
 Response error_response(int status, const std::string& msg) {
     js::Object o{{"error", msg}};
@@ -70,14 +68,12 @@ Response error_response(int status, const std::string& msg) {
 struct VenueSession {
     std::string name;
     std::unique_ptr<VenueAdapter> adapter;
-    std::unique_ptr<Session> session;
-    std::shared_ptr<net::TcpConnection> conn;
+    FIX::SessionID sid;
     std::string host;
     int port = 0;
     Credentials creds;
-    bool enabled = true;
-    Clock::time_point next_connect{};
-    std::string last_error;
+    std::string state = "disconnected";
+    std::string last_event;
 };
 
 struct OrderRecord {
@@ -99,110 +95,165 @@ struct QueuedOrder {
     NewOrder order;
 };
 
-class Gateway {
+class Gateway : public FIX::Application {
 public:
     Gateway(net::Reactor& r, gateway::HttpServer& http, std::string ui_dir)
-        : r_(r), http_(http), ui_dir_(std::move(ui_dir)) {
+        : r_(r), http_(http), ui_dir_(std::move(ui_dir)),
+          log_factory_([this](const FIX::SessionID* sid, fixgen::qf::CallbackLogFactory::Kind k,
+                              const std::string& text) { on_log(sid, k, text); }) {
         auto t = std::chrono::system_clock::now().time_since_epoch();
         id_prefix_ = "FG" + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(t).count() % 100000000) + "-";
         http_.handler = [this](const Request& rq) { return handle(rq); };
         http_.on_sse_open = [this](const auto& c) { snapshot(c); };
-        r_.every(std::chrono::milliseconds(250), [this] { tick(); });
+        r_.every(std::chrono::milliseconds(250), [this] { refresh_states(); });
         r_.every(std::chrono::milliseconds(10), [this] { drain_queue(); });
     }
 
-    bool add_session(const js::Value& cfg, std::string* err) {
+    bool add_session(const js::Value& cfg, const std::string& dict_dir, const std::string& store_dir,
+                     std::string* err) {
         auto vs = std::make_unique<VenueSession>();
-        vs->name = cfg["name"].as_string();
         std::string venue = cfg["venue"].as_string();
         vs->adapter = make_venue(venue);
         if (!vs->adapter) { *err = "unknown venue '" + venue + "' (not in spec/venues?)"; return false; }
-        if (vs->name.empty()) vs->name = venue;
+        vs->name = cfg["name"].as_string(venue);
         if (sessions_.count(vs->name)) { *err = "duplicate session name " + vs->name; return false; }
         vs->host = cfg["host"].as_string("127.0.0.1");
         vs->port = static_cast<int>(cfg["port"].as_int());
-        vs->enabled = cfg.has("enabled") ? cfg["enabled"].as_bool() : true;
         for (const auto& [k, v] : cfg["credentials"].as_object()) vs->creds[k] = expand_env(v.as_string());
+        Message probe("A");
+        if (auto r = vs->adapter->decorate_logon(probe, vs->creds); !r) { *err = vs->name + ": " + r.error(); return false; }
 
-        auto d = vs->adapter->session_defaults();
-        SessionConfig sc;
-        sc.begin_string = d.begin_string;
-        sc.default_appl_ver_id = d.default_appl_ver_id;
-        sc.heartbeat_secs = cfg.has("heartbeat_secs") ? static_cast<int>(cfg["heartbeat_secs"].as_int()) : d.heartbeat_secs;
-        sc.reset_seq_num_on_logon = d.reset_seq_num_on_logon;
-        sc.sender_comp_id = cfg["sender_comp_id"].as_string();
-        sc.target_comp_id = cfg["target_comp_id"].as_string();
-        sc.initiator = true;
-        if (sc.sender_comp_id.empty() || sc.target_comp_id.empty()) { *err = vs->name + ": comp ids required"; return false; }
-
-        VenueSession* raw = vs.get();
-        vs->session = std::make_unique<Session>(sc, [raw](const std::string& bytes) {
-            if (raw->conn) raw->conn->send(bytes);
-        });
-        vs->session->decorate_logon = [this, raw](Message& logon) {
-            auto r = raw->adapter->decorate_logon(logon, raw->creds);
-            if (!r) raw->last_error = r.error();
-        };
-        vs->session->on_state = [this, raw](SessionState s, const std::string& why) {
-            std::printf("[%s] session %s: %s\n", raw->name.c_str(), std::string(to_string(s)).c_str(), why.c_str());
-            if (s == SessionState::Disconnected) {
-                raw->last_error = why;
-                raw->next_connect = Clock::now() + std::chrono::seconds(5);
-            }
-            http_.broadcast("session", session_json(*raw).dump());
-        };
-        vs->session->on_raw = [this, raw](bool out, const std::string& bytes) {
-            js::Object o{{"session", raw->name}, {"dir", out ? "out" : "in"}, {"msg", redact(bytes)}};
-            std::string s = js::Value(o).dump();
-            fix_log_.push_back(s);
-            if (fix_log_.size() > 300) fix_log_.pop_front();
-            http_.broadcast("fix", s);
-        };
-        vs->session->request_disconnect = [this, raw] {
-            if (raw->conn) r_.post([c = raw->conn] { c->close("session closed"); });
-        };
-        vs->session->on_app_message = [this, raw](const Message& m) { on_venue_message(*raw, m); };
+        fixgen::qf::SessionParams p;
+        p.sender_comp_id = cfg["sender_comp_id"].as_string();
+        p.target_comp_id = cfg["target_comp_id"].as_string();
+        if (p.sender_comp_id.empty() || p.target_comp_id.empty()) { *err = vs->name + ": comp ids required"; return false; }
+        p.initiator = true;
+        p.host = vs->host;
+        p.port = vs->port;
+        p.heartbeat_secs = static_cast<int>(cfg["heartbeat_secs"].as_int(0));
+        p.reconnect_secs = static_cast<int>(cfg["reconnect_secs"].as_int(5));
+        p.dict_dir = dict_dir;
+        p.store_dir = store_dir;
+        try {
+            vs->sid = fixgen::qf::add_session(settings_, *vs->adapter, p);
+        } catch (const std::exception& e) {
+            *err = vs->name + ": " + e.what();
+            return false;
+        }
+        by_sid_[vs->sid] = vs.get();
+        order_.push_back(vs->name);
         sessions_[vs->name] = std::move(vs);
-        order_.push_back(raw->name);
         return true;
     }
 
-private:
-    // ---------- FIX side ----------
-    void connect(VenueSession& vs) {
-        std::string err;
-        int fd = net::tcp_connect(vs.host, vs.port, 2000, &err);
-        if (fd < 0) {
-            vs.last_error = err;
-            vs.next_connect = Clock::now() + std::chrono::seconds(5);
-            http_.broadcast("session", session_json(vs).dump());
-            return;
-        }
-        vs.conn = net::TcpConnection::adopt(r_, fd, vs.host + ":" + std::to_string(vs.port));
-        VenueSession* raw = &vs;
-        vs.conn->on_data = [raw](std::string_view d) { raw->session->on_bytes(d); };
-        vs.conn->on_close = [this, raw](const std::string& why) {
-            raw->conn.reset();
-            raw->session->disconnected(why);
-        };
-        vs.last_error.clear();
-        vs.session->connected();
+    // Call once all sessions are added.
+    void start() {
+        store_ = std::make_unique<FIX::FileStoreFactory>(settings_);
+        initiator_ = std::make_unique<FIX::SocketInitiator>(*this, *store_, settings_, log_factory_);
+        r_.every(std::chrono::milliseconds(2), [this] { poll(); });
     }
 
-    void tick() {
-        auto now = Clock::now();
-        for (auto& [name, vs] : sessions_) {
-            if (!vs->conn && vs->enabled && now >= vs->next_connect) connect(*vs);
-            vs->session->tick(now);
+private:
+    // ---------- QuickFIX side ----------
+    void poll() {
+        try {
+            initiator_->poll();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "quickfix: %s\n", e.what());
         }
+    }
+
+    VenueSession* find(const FIX::SessionID& sid) {
+        auto it = by_sid_.find(sid);
+        return it == by_sid_.end() ? nullptr : it->second;
+    }
+
+    static FIX::Session* qf_session(const VenueSession& vs) { return FIX::Session::lookupSession(vs.sid); }
+
+    static std::string state_of(const VenueSession& vs) {
+        auto* s = qf_session(vs);
+        if (!s) return "disconnected";
+        if (s->isLoggedOn()) return "active";
+        if (s->sentLogout()) return "logout_sent";
+        if (s->sentLogon()) return "logon_sent";
+        return s->isEnabled() ? "disconnected" : "disabled";
+    }
+
+    void refresh_states() {
+        for (auto& [name, vs] : sessions_) {
+            auto st = state_of(*vs);
+            if (st == vs->state) continue;
+            vs->state = st;
+            std::printf("[%s] session %s\n", vs->name.c_str(), st.c_str());
+            std::fflush(stdout);
+            http_.broadcast("session", session_json(*vs).dump());
+        }
+    }
+
+    void on_log(const FIX::SessionID* sid, fixgen::qf::CallbackLogFactory::Kind k, const std::string& text) {
+        VenueSession* vs = sid ? find(*sid) : nullptr;
+        std::string name = vs ? vs->name : "-";
+        if (k == fixgen::qf::CallbackLogFactory::Kind::Event) {
+            if (vs) vs->last_event = text;
+            std::printf("[%s] %s\n", name.c_str(), text.c_str());
+            std::fflush(stdout);
+            return;
+        }
+        bool out = k == fixgen::qf::CallbackLogFactory::Kind::Outgoing;
+        js::Object o{{"session", name}, {"dir", out ? "out" : "in"}, {"msg", fixgen::qf::display(text)}};
+        std::string s = js::Value(o).dump();
+        fix_log_.push_back(s);
+        if (fix_log_.size() > 300) fix_log_.pop_front();
+        http_.broadcast("fix", s);
+    }
+
+    // FIX::Application
+    void onCreate(const FIX::SessionID&) override {}
+    void onLogon(const FIX::SessionID&) override { r_.post([this] { refresh_states(); }); }
+    void onLogout(const FIX::SessionID&) override { r_.post([this] { refresh_states(); }); }
+    void toApp(FIX::Message&, const FIX::SessionID&) override {}
+    void toAdmin(FIX::Message& msg, const FIX::SessionID& sid) override {
+        VenueSession* vs = find(sid);
+        if (!vs || msg.getHeader().getField(FIX::FIELD::MsgType) != "A") return;
+        Message extra("A");
+        if (auto r = vs->adapter->decorate_logon(extra, vs->creds); !r) {
+            vs->last_event = r.error();
+            return;
+        }
+        for (const auto& f : extra.body()) msg.setField(f.tag, f.value);
+    }
+    void fromAdmin(const FIX::Message& msg, const FIX::SessionID& sid) override {
+        VenueSession* vs = find(sid);
+        if (!vs) return;
+        const auto& type = msg.getHeader().getField(FIX::FIELD::MsgType);
+        if (type == "3" || type == "5") {
+            std::string text = msg.isSetField(58) ? msg.getField(58) : "";
+            if (type == "5" && text.empty()) return;
+            http_.broadcast("notice", js::Value(js::Object{{"session", vs->name}, {"level", "error"},
+                {"text", (type == "3" ? "session reject of seq " + (msg.isSetField(45) ? msg.getField(45) : "?") + ": "
+                                      : "logout: ") + text}}).dump());
+            vs->last_event = text;
+        }
+    }
+    void fromApp(const FIX::Message& msg, const FIX::SessionID& sid) override {
+        if (VenueSession* vs = find(sid)) on_venue_message(*vs, fixgen::qf::from_quickfix(msg));
+    }
+
+    bool send(VenueSession& vs, const Message& m) {
+        FIX::Message q = fixgen::qf::to_quickfix(m);
+        try {
+            return FIX::Session::sendToTarget(q, vs.sid);
+        } catch (const FIX::SessionNotFound&) {
+            return false;
+        }
+    }
+
+    bool active(const VenueSession& vs) const {
+        auto* s = qf_session(vs);
+        return s && s->isLoggedOn();
     }
 
     void on_venue_message(VenueSession& vs, const Message& m) {
-        if (m.msg_type() == "3") {
-            http_.broadcast("notice", js::Value(js::Object{{"session", vs.name}, {"level", "error"},
-                {"text", "session reject of seq " + m.get_or(45) + ": " + m.get_or(58)}}).dump());
-            return;
-        }
         auto ev = vs.adapter->parse(m);
         if (!ev) return;
         std::string key;
@@ -242,8 +293,7 @@ private:
     std::string next_id() { return id_prefix_ + std::to_string(++id_counter_); }
 
     Result<std::string> place(VenueSession& vs, NewOrder o) {
-        if (vs.session->state() != SessionState::Active)
-            return Result<std::string>::fail(vs.name + " is not logged on");
+        if (!active(vs)) return Result<std::string>::fail(vs.name + " is not logged on");
         auto msg = vs.adapter->build_new_order(o);
         if (!msg) return Result<std::string>::fail(msg.error());
         OrderRecord rec;
@@ -259,8 +309,8 @@ private:
         rec.account = o.account.value_or("");
         rec.extra = o.extra;
         by_cl_ord_id_[rec.cl_ord_id] = rec.key;
+        if (!send(vs, msg.value())) return Result<std::string>::fail(vs.name + ": send failed");
         auto& stored = orders_[rec.key] = std::move(rec);
-        vs.session->send(std::move(msg.value()));
         publish(stored);
         return stored.key;
     }
@@ -301,11 +351,11 @@ private:
             {"name", vs.name},
             {"venue", std::string(vs.adapter->id())},
             {"venue_name", std::string(vs.adapter->name())},
-            {"begin_string", vs.session->config().begin_string},
-            {"state", std::string(to_string(vs.session->state()))},
+            {"begin_string", vs.sid.getBeginString().getValue()},
+            {"state", vs.state},
             {"endpoint", vs.host + ":" + std::to_string(vs.port)},
-            {"last_error", vs.last_error},
-            {"enabled", vs.enabled},
+            {"last_error", vs.last_event},
+            {"enabled", qf_session(vs) && qf_session(vs)->isEnabled()},
             {"capabilities", js::Object{
                 {"sides", strs(caps.sides)}, {"ord_types", strs(caps.ord_types)}, {"tifs", strs(caps.tifs)},
                 {"cancel", caps.cancel}, {"replace", caps.replace}, {"instrument_field", caps.instrument_field},
@@ -360,14 +410,11 @@ private:
             auto it = sessions_.find(m[1]);
             if (it == sessions_.end()) return error_response(404, "no such session");
             auto& vs = *it->second;
-            if (m[2] == "connect") {
-                vs.enabled = true;
-                vs.next_connect = Clock::now();
-            } else {
-                vs.enabled = false;
-                vs.session->logout("operator disconnect");
-                if (vs.session->state() != SessionState::LogoutSent && vs.conn) vs.conn->close("operator disconnect");
-            }
+            auto* s = qf_session(vs);
+            if (!s) return error_response(500, "session not created");
+            if (m[2] == "connect") s->logon();       // re-enables; the initiator reconnects
+            else s->logout("operator disconnect");  // disables until connect
+            vs.state = state_of(vs);
             return json_response(200, session_json(vs));
         }
 
@@ -419,7 +466,7 @@ private:
         // Dry-run the translation once so validation errors come back synchronously.
         o.cl_ord_id = "DRYRUN";
         if (auto dry = vs.adapter->build_new_order(o); !dry) return error_response(400, dry.error());
-        if (vs.session->state() != SessionState::Active) return error_response(409, vs.name + " is not logged on");
+        if (!active(vs)) return error_response(409, vs.name + " is not logged on");
 
         js::Array ids;
         if (rate > 0 || count > 1000) {
@@ -443,20 +490,20 @@ private:
 
     Response cancel(OrderRecord& o) {
         auto& vs = *sessions_[o.session];
-        if (vs.session->state() != SessionState::Active) return error_response(409, vs.name + " is not logged on");
+        if (!active(vs)) return error_response(409, vs.name + " is not logged on");
         CancelOrder c{next_id(), o.cl_ord_id, o.symbol, o.side, o.qty, {}};
         auto msg = vs.adapter->build_cancel(c);
         if (!msg) return error_response(400, msg.error());
         by_cl_ord_id_[c.cl_ord_id] = o.key;
+        if (!send(vs, msg.value())) return error_response(409, vs.name + ": send failed");
         o.pending = "cancel";
-        vs.session->send(std::move(msg.value()));
         publish(o);
         return json_response(200, order_json(o));
     }
 
     Response replace(OrderRecord& o, const js::Value& b) {
         auto& vs = *sessions_[o.session];
-        if (vs.session->state() != SessionState::Active) return error_response(409, vs.name + " is not logged on");
+        if (!active(vs)) return error_response(409, vs.name + " is not logged on");
         ReplaceOrder r;
         r.cl_ord_id = next_id();
         r.orig_cl_ord_id = o.cl_ord_id;
@@ -472,10 +519,10 @@ private:
         auto msg = vs.adapter->build_replace(r);
         if (!msg) return error_response(400, msg.error());
         by_cl_ord_id_[r.cl_ord_id] = o.key;
+        if (!send(vs, msg.value())) return error_response(409, vs.name + ": send failed");
         o.pending = "replace";
         o.pending_qty = r.qty;
         o.pending_price = px;
-        vs.session->send(std::move(msg.value()));
         publish(o);
         return json_response(200, order_json(o));
     }
@@ -483,6 +530,11 @@ private:
     net::Reactor& r_;
     gateway::HttpServer& http_;
     std::string ui_dir_;
+    fixgen::qf::CallbackLogFactory log_factory_;
+    FIX::SessionSettings settings_;
+    std::unique_ptr<FIX::FileStoreFactory> store_;
+    std::unique_ptr<FIX::SocketInitiator> initiator_;
+    std::map<FIX::SessionID, VenueSession*> by_sid_;
     std::map<std::string, std::unique_ptr<VenueSession>> sessions_;
     std::vector<std::string> order_;  // session names in config order
     std::map<std::string, OrderRecord> orders_;
@@ -527,8 +579,17 @@ int main(int argc, char** argv) {
     if (!http.ok()) { std::fprintf(stderr, "http: %s\n", http.error().c_str()); return 1; }
 
     Gateway gw(reactor, http, http_cfg["ui_dir"].as_string("ui"));
+    // QuickFIX FileStore keeps sequence numbers and sent messages across restarts.
+    std::string store_dir = (*cfg)["store_dir"].as_string("var/fixstore");
+    std::string dict_dir = (*cfg)["dictionary_dir"].as_string();
     for (const auto& s : (*cfg)["sessions"].as_array()) {
-        if (!gw.add_session(s, &err)) { std::fprintf(stderr, "config: %s\n", err.c_str()); return 1; }
+        if (!gw.add_session(s, dict_dir, store_dir, &err)) { std::fprintf(stderr, "config: %s\n", err.c_str()); return 1; }
+    }
+    try {
+        gw.start();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "quickfix: %s\n", e.what());
+        return 1;
     }
     std::printf("fixgen-gateway listening on http://%s:%d\n", host.c_str(), port);
     std::fflush(stdout);

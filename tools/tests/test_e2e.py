@@ -50,6 +50,7 @@ def stack(tmp_path):
     ]
     cfg = json.loads((ROOT / "config" / "gateway.json").read_text())
     cfg["http"] = {"host": "127.0.0.1", "port": http_port, "ui_dir": str(ROOT / "ui")}
+    cfg["store_dir"] = str(tmp_path / "store")
     cfg["sessions"][0]["port"] = demo_port
     cfg["sessions"][1]["port"] = acme_port
     (tmp_path / "gw.json").write_text(json.dumps(cfg))

@@ -1,5 +1,5 @@
-// fixgen-sim: a thin, spec-driven FIX acceptor for testing. It is NOT a matching
-// engine: it validates what it receives against the venue's own generated dictionary,
+// fixgen-sim: a thin, spec-driven FIX acceptor for testing, built on QuickFIX's acceptor.
+// It is NOT a matching engine: it validates what it receives against the venue's own generated dictionary,
 // then acks / fills / cancels / replaces according to a simple policy.
 //
 // Because it shares the venue spec with the gateway, it proves the plumbing and the
@@ -12,10 +12,13 @@
 #include <memory>
 #include <string>
 
+#include "bridge.hpp"
 #include "fixcore/codec.hpp"
-#include "fixcore/net.hpp"
-#include "fixcore/session.hpp"
 #include "fixcore/venue_adapter.hpp"
+#include "quickfix/Application.h"
+#include "quickfix/MessageStore.h"
+#include "quickfix/Session.h"
+#include "quickfix/SocketAcceptor.h"
 
 using namespace fixcore;
 
@@ -25,9 +28,9 @@ enum class FillMode { None, Immediate, Partial };
 
 struct Options {
     std::string venue;
-    std::string host = "127.0.0.1";
     int port = 0;
     std::string comp_id = "SIM";
+    std::string client_comp_id = "BLASTER";
     FillMode fill = FillMode::Immediate;
     std::string market_px = "100";
     std::string reject_symbol = "REJECT";  // orders for this symbol are rejected
@@ -47,51 +50,41 @@ std::string fmt(double v) {
     return buf;
 }
 
-class SimConnection {
+class Sim : public FIX::Application {
 public:
-    SimConnection(const Options& opt, const VenueAdapter& venue, std::shared_ptr<net::TcpConnection> c)
-        : opt_(opt), venue_(venue), conn_(std::move(c)) {
-        auto d = venue_.session_defaults();
-        SessionConfig sc;
-        sc.begin_string = d.begin_string;
-        sc.default_appl_ver_id = d.default_appl_ver_id;
-        sc.heartbeat_secs = d.heartbeat_secs;
-        sc.reset_seq_num_on_logon = d.reset_seq_num_on_logon;
-        sc.sender_comp_id = opt_.comp_id;
-        sc.initiator = false;
-        session_ = std::make_unique<Session>(sc, [this](const std::string& b) { conn_->send(b); });
-        session_->accept_logon = [this](const Message& logon) -> std::string {
-            for (int tag : venue_.capabilities().logon_tags)
-                if (!logon.has(tag)) return "logon missing tag " + std::to_string(tag);
-            return {};
-        };
-        session_->on_raw = [this](bool out, const std::string& raw) {
-            if (opt_.quiet) return;
-            std::string s = raw;
-            for (auto& ch : s) if (ch == SOH) ch = '|';
-            std::printf("%s %s\n", out ? ">>" : "<<", s.c_str());
-            std::fflush(stdout);
-        };
-        session_->on_state = [this](SessionState s, const std::string& why) {
-            std::printf("[%s] %s (%s)\n", conn_->peer().c_str(), std::string(to_string(s)).c_str(), why.c_str());
-            std::fflush(stdout);
-        };
-        session_->request_disconnect = [this] { conn_->close("session ended"); };
-        session_->on_app_message = [this](const Message& m) { on_app(m); };
-        conn_->on_data = [this](std::string_view d) { session_->on_bytes(d); };
-        session_->connected();
-    }
-
-    Session& session() { return *session_; }
-    std::shared_ptr<net::TcpConnection> conn() { return conn_; }
+    Sim(const Options& opt, const VenueAdapter& venue) : opt_(opt), venue_(venue) {}
 
 private:
+    // FIX::Application
+    void onCreate(const FIX::SessionID&) override {}
+    void onLogon(const FIX::SessionID& sid) override {
+        std::printf("[%s] logged on\n", sid.toString().c_str());
+        std::fflush(stdout);
+    }
+    void onLogout(const FIX::SessionID& sid) override {
+        std::printf("[%s] logged out\n", sid.toString().c_str());
+        std::fflush(stdout);
+        orders_.clear();
+    }
+    void toAdmin(FIX::Message&, const FIX::SessionID&) override {}
+    void toApp(FIX::Message&, const FIX::SessionID&) override {}
+    void fromAdmin(const FIX::Message& m, const FIX::SessionID&) override {
+        if (m.getHeader().getField(FIX::FIELD::MsgType) != "A") return;
+        for (int tag : venue_.capabilities().logon_tags)
+            if (!m.isSetField(tag)) throw FIX::RejectLogon("logon missing tag " + std::to_string(tag));
+    }
+    void fromApp(const FIX::Message& m, const FIX::SessionID& sid) override {
+        sid_ = sid;
+        on_app(fixgen::qf::from_quickfix(m));
+    }
+
     void send(Result<Message> r) {
         if (!r) {
             std::printf("!! cannot build response: %s\n", r.error().c_str());
             return;
         }
-        session_->send(std::move(r.value()));
+        FIX::Message q = fixgen::qf::to_quickfix(r.value());
+        FIX::Session::sendToTarget(q, sid_);
     }
 
     ExecKind fill_kind(bool full) const {
@@ -133,14 +126,17 @@ private:
         a.status = OrderStatus::Rejected;
         a.text = why.substr(0, 200);
         auto r = venue_.build_exec_report(req, a);
-        if (!r) {  // venue cannot express a reject ER: fall back to a session-level reject
-            Message rj(msgtype::Reject);
-            rj.set(tags::RefSeqNum, req.get_or(tags::MsgSeqNum));
+        if (!r) {  // venue cannot express a reject ER: fall back to a business message reject
+            Message rj("j");
+            rj.set(45, req.get_or(tags::MsgSeqNum));
+            rj.set(372, req.msg_type());
+            rj.set(380, "0");
             rj.set(tags::Text, why.substr(0, 200));
-            session_->send(std::move(rj));
+            FIX::Message q = fixgen::qf::to_quickfix(rj);
+            FIX::Session::sendToTarget(q, sid_);
             return;
         }
-        session_->send(std::move(r.value()));
+        send(std::move(r));
     }
 
     void on_app(const Message& m) {
@@ -215,15 +211,14 @@ private:
 
     const Options& opt_;
     const VenueAdapter& venue_;
-    std::shared_ptr<net::TcpConnection> conn_;
-    std::unique_ptr<Session> session_;
+    FIX::SessionID sid_;
     std::map<std::string, SimOrder> orders_;
     long order_seq_ = 0, exec_seq_ = 0;
 };
 
 int usage() {
     std::fprintf(stderr,
-                 "usage: fixgen-sim --venue ID --port N [--host H] [--comp-id SIM]\n"
+                 "usage: fixgen-sim --venue ID --port N [--comp-id SIM] [--client-comp-id BLASTER]\n"
                  "                  [--fill none|immediate|partial] [--market-px 100]\n"
                  "                  [--reject-symbol REJECT] [--quiet]\n"
                  "venues:");
@@ -241,8 +236,8 @@ int main(int argc, char** argv) {
         auto next = [&]() -> std::string { return i + 1 < argc ? argv[++i] : ""; };
         if (a == "--venue") opt.venue = next();
         else if (a == "--port") opt.port = std::atoi(next().c_str());
-        else if (a == "--host") opt.host = next();
         else if (a == "--comp-id") opt.comp_id = next();
+        else if (a == "--client-comp-id") opt.client_comp_id = next();
         else if (a == "--market-px") opt.market_px = next();
         else if (a == "--reject-symbol") opt.reject_symbol = next();
         else if (a == "--quiet") opt.quiet = true;
@@ -257,33 +252,32 @@ int main(int argc, char** argv) {
     auto venue = make_venue(opt.venue);
     if (!venue || opt.port <= 0) return usage();
 
-    std::string err;
-    int lfd = net::tcp_listen(opt.host, opt.port, &err);
-    if (lfd < 0) { std::fprintf(stderr, "listen: %s\n", err.c_str()); return 1; }
-
-    net::Reactor reactor;
-    std::map<net::TcpConnection*, std::unique_ptr<SimConnection>> conns;
-    reactor.add(lfd, [&](short) {
-        std::string peer;
-        int fd;
-        while ((fd = net::tcp_accept(lfd, &peer)) >= 0) {
-            auto c = net::TcpConnection::adopt(reactor, fd, peer);
-            auto* key = c.get();
-            auto sim = std::make_unique<SimConnection>(opt, *venue, c);
-            c->on_close = [&, key](const std::string& why) {
-                if (auto it = conns.find(key); it != conns.end()) {
-                    it->second->session().disconnected(why);
-                    conns.erase(it);
-                }
-            };
-            conns[key] = std::move(sim);
-        }
-    });
-    reactor.every(std::chrono::milliseconds(500), [&] {
-        for (auto& [k, c] : conns) c->session().tick();
-    });
-    std::printf("fixgen-sim: %s (%s) on %s:%d as %s\n", std::string(venue->id()).c_str(),
-                venue->session_defaults().begin_string.c_str(), opt.host.c_str(), opt.port, opt.comp_id.c_str());
-    std::fflush(stdout);
-    reactor.run();
+    fixgen::qf::SessionParams p;
+    p.sender_comp_id = opt.comp_id;
+    p.target_comp_id = opt.client_comp_id;
+    p.initiator = false;
+    p.port = opt.port;
+    try {
+        FIX::SessionSettings settings;
+        fixgen::qf::add_session(settings, *venue, p);
+        Sim app(opt, *venue);
+        FIX::MemoryStoreFactory store;
+        fixgen::qf::CallbackLogFactory log([&](const FIX::SessionID*, fixgen::qf::CallbackLogFactory::Kind k,
+                                               const std::string& text) {
+            using K = fixgen::qf::CallbackLogFactory::Kind;
+            if (opt.quiet && k != K::Event) return;
+            std::printf("%s %s\n", k == K::Incoming ? "<<" : k == K::Outgoing ? ">>" : "--",
+                        fixgen::qf::display(text).c_str());
+            std::fflush(stdout);
+        });
+        FIX::SocketAcceptor acceptor(app, store, settings, log);
+        std::printf("fixgen-sim: %s (%s) on port %d as %s, expecting %s\n", std::string(venue->id()).c_str(),
+                    venue->session_defaults().begin_string.c_str(), opt.port, opt.comp_id.c_str(),
+                    opt.client_comp_id.c_str());
+        std::fflush(stdout);
+        acceptor.block();
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "fixgen-sim: %s\n", e.what());
+        return 1;
+    }
 }

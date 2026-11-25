@@ -3,6 +3,7 @@
 For each venue we emit:
   <id>.hpp  typed tag / enum-value constants for hand-written code, plus accessors
   <id>.cpp  constexpr dictionary + mapping tables and an adapter factory
+  dict/<id>.xml (+ dict/<id>.transport.xml for FIXT)  QuickFIX data dictionaries
 and once per build:
   registry.cpp  make_all_venues() / make_venue(id)
 
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from .fix_standard import ADMIN_MESSAGES, APPL_VER_IDS, FIXT_HEADER_EXTRA, HEADER, SESSION_FIELDS, TRAILER
 from .spec import field_map, load_and_validate
 
 TEMPLATES = Path(__file__).parent / "templates"
@@ -93,6 +95,68 @@ def build_model(spec: dict, spec_path: str) -> dict:
     }
 
 
+def quickfix_dictionaries(spec: dict) -> dict[str, tuple[str, dict]]:
+    """QuickFIX data dictionaries for a venue: {file name: (purpose, model)}.
+
+    QuickFIX only validates *incoming* messages, and a message that fails is answered with
+    a session Reject and never reaches the application. If the venue sends a value our spec
+    missed, a strict dictionary would silently drop that execution report. So these are
+    deliberately lenient parsing dictionaries (types and message layout, nothing required,
+    no enum lists); fixcore::Dictionary does the strict checks: it blocks bad outbound
+    messages and turns inbound deviations into warnings on the order.
+    """
+    venue_id = spec["venue"]["id"]
+    fields = field_map(spec)
+    by_tag = {f["tag"]: f for f in spec["fields"]}
+    for tag, (name, _) in SESSION_FIELDS.items():
+        if tag in by_tag and by_tag[tag]["name"] != name:
+            raise ValueError(f"{venue_id}: tag {tag} is {name} in FIX but {by_tag[tag]['name']} in the spec")
+        if name in fields and fields[name]["tag"] != tag:
+            raise ValueError(f"{venue_id}: field name {name} must be tag {tag}")
+
+    def fdef(tag: int, name: str, typ: str) -> dict:
+        return {"tag": tag, "name": name, "type": typ}
+
+    session_fields = {t: fdef(t, n, ty) for t, (n, ty) in SESSION_FIELDS.items()}
+    venue_fields = {f["tag"]: fdef(f["tag"], f["name"], f["type"]) for f in spec["fields"]}
+    s = spec["session"]
+    fixt = s["begin_string"] == "FIXT.1.1"
+    logon_extra = [lf["field"] for lf in s.get("logon_fields", [])]
+
+    def req(items):
+        return [{"name": n, "required": r} for n, r in items]
+
+    admin = []
+    for mt, (name, flds) in ADMIN_MESSAGES.items():
+        flds = list(flds)
+        if mt == "A":
+            if fixt:
+                flds.insert(2, ("DefaultApplVerID", True))
+            flds += [(n, False) for n in logon_extra if n not in {f for f, _ in flds}]
+        admin.append({"msg_type": mt, "name": name, "cat": "admin", "fields": req(flds)})
+    app = [{"msg_type": m["msg_type"], "name": m["name"], "cat": "app",
+            "fields": [{"name": mf["field"], "required": False} for mf in m["fields"]]}
+           for m in spec["messages"]]
+
+    header = req(HEADER + (FIXT_HEADER_EXTRA if fixt else []))
+    if not fixt:
+        major, minor = s["begin_string"].removeprefix("FIX.").split(".")
+        all_fields = {**session_fields, **venue_fields}
+        d = {"type": "FIX", "major": major, "minor": minor, "sp": 0, "header": header, "trailer": req(TRAILER),
+             "messages": admin + app, "fields": [all_fields[t] for t in sorted(all_fields)]}
+        return {f"{venue_id}.xml": ("Session + application dictionary (lenient, see codegen.py).", d)}
+
+    logon_tags = {fields[n]["tag"] for n in logon_extra}
+    transport_fields = {**session_fields, **{t: venue_fields[t] for t in logon_tags}}
+    major, minor, sp = APPL_VER_IDS.get(s.get("default_appl_ver_id", "9"), (5, 0, 2))
+    transport = {"type": "FIXT", "major": 1, "minor": 1, "sp": 0, "header": header, "trailer": req(TRAILER),
+                 "messages": admin, "fields": [transport_fields[t] for t in sorted(transport_fields)]}
+    app_d = {"type": "FIX", "major": major, "minor": minor, "sp": sp, "header": [], "trailer": [],
+             "messages": app, "fields": [venue_fields[t] for t in sorted(venue_fields)]}
+    return {f"{venue_id}.transport.xml": ("FIXT.1.1 transport dictionary.", transport),
+            f"{venue_id}.xml": ("Application dictionary (lenient, see codegen.py).", app_d)}
+
+
 def generate(spec_paths: list[str | Path], out_dir: str | Path) -> list[Path]:
     out = Path(out_dir)
     (out / "fixgen" / "venues").mkdir(parents=True, exist_ok=True)
@@ -114,5 +178,9 @@ def generate(spec_paths: list[str | Path], out_dir: str | Path) -> list[Path]:
         venues.append(model)
         write(out / "fixgen" / "venues" / f"{model['id']}.hpp", env.get_template("venue.hpp.j2").render(v=model))
         write(out / f"{model['id']}.cpp", env.get_template("venue.cpp.j2").render(v=model))
+        (out / "dict").mkdir(exist_ok=True)
+        for name, (purpose, d) in quickfix_dictionaries(spec).items():
+            write(out / "dict" / name, env.get_template("quickfix_dict.xml.j2").render(
+                d=d, purpose=purpose, spec_path=sp.name))
     write(out / "registry.cpp", env.get_template("registry.cpp.j2").render(venues=venues))
     return written

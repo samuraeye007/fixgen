@@ -39,3 +39,43 @@ STANDARD_ENUMS: dict[str, tuple[str, dict[str, str]]] = {
                                  "replaced": "5", "pending_cancel": "6", "rejected": "8", "pending_new": "A",
                                  "expired": "C", "pending_replace": "E"}),
 }
+
+
+# ---------------------------------------------------------------------------------------------
+# Session-level definitions for generated QuickFIX data dictionaries. Venue specs describe only
+# application messages; QuickFIX also needs the header, trailer and admin messages.
+SESSION_FIELDS: dict[int, tuple[str, str]] = {
+    7: ("BeginSeqNo", "SEQNUM"), 8: ("BeginString", "STRING"), 9: ("BodyLength", "LENGTH"),
+    10: ("CheckSum", "STRING"), 16: ("EndSeqNo", "SEQNUM"), 34: ("MsgSeqNum", "SEQNUM"),
+    35: ("MsgType", "STRING"), 36: ("NewSeqNo", "SEQNUM"), 43: ("PossDupFlag", "BOOLEAN"),
+    45: ("RefSeqNum", "SEQNUM"), 49: ("SenderCompID", "STRING"), 52: ("SendingTime", "UTCTIMESTAMP"),
+    56: ("TargetCompID", "STRING"), 58: ("Text", "STRING"), 97: ("PossResend", "BOOLEAN"),
+    98: ("EncryptMethod", "INT"), 108: ("HeartBtInt", "INT"), 112: ("TestReqID", "STRING"),
+    122: ("OrigSendingTime", "UTCTIMESTAMP"), 123: ("GapFillFlag", "BOOLEAN"),
+    141: ("ResetSeqNumFlag", "BOOLEAN"), 371: ("RefTagID", "INT"), 372: ("RefMsgType", "STRING"),
+    373: ("SessionRejectReason", "INT"), 789: ("NextExpectedMsgSeqNum", "SEQNUM"),
+    1128: ("ApplVerID", "STRING"), 1137: ("DefaultApplVerID", "STRING"),
+}
+
+# (name, required)
+HEADER = [("BeginString", True), ("BodyLength", True), ("MsgType", True), ("SenderCompID", True),
+          ("TargetCompID", True), ("MsgSeqNum", True), ("PossDupFlag", False), ("PossResend", False),
+          ("SendingTime", True), ("OrigSendingTime", False)]
+FIXT_HEADER_EXTRA = [("ApplVerID", False)]
+TRAILER = [("CheckSum", True)]
+
+# msg_type -> (name, [(field, required)])
+ADMIN_MESSAGES: dict[str, tuple[str, list[tuple[str, bool]]]] = {
+    "0": ("Heartbeat", [("TestReqID", False)]),
+    "1": ("TestRequest", [("TestReqID", True)]),
+    "2": ("ResendRequest", [("BeginSeqNo", True), ("EndSeqNo", True)]),
+    "3": ("Reject", [("RefSeqNum", True), ("RefTagID", False), ("RefMsgType", False),
+                     ("SessionRejectReason", False), ("Text", False)]),
+    "4": ("SequenceReset", [("GapFillFlag", False), ("NewSeqNo", True)]),
+    "5": ("Logout", [("Text", False)]),
+    "A": ("Logon", [("EncryptMethod", True), ("HeartBtInt", True), ("ResetSeqNumFlag", False),
+                    ("NextExpectedMsgSeqNum", False)]),
+}
+
+# DefaultApplVerID -> (major, minor, servicepack) of the application dictionary
+APPL_VER_IDS = {"7": (5, 0, 0), "8": (5, 0, 1), "9": (5, 0, 2)}

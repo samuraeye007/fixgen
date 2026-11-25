@@ -16,19 +16,6 @@ std::string encode(const Message& msg, std::string_view begin_string = {});
 // Parse one complete frame. Verifies BodyLength and CheckSum.
 std::optional<Message> decode(std::string_view frame, std::string* error = nullptr);
 
-// Accumulates a byte stream and yields complete frames.
-class FrameParser {
-public:
-    void feed(std::string_view bytes) { buf_.append(bytes); }
-    // Returns the next complete raw frame, if any. Garbage before "8=" is discarded.
-    // On a malformed frame returns an empty string and sets *error.
-    std::optional<std::string> next_frame(std::string* error = nullptr);
-    std::size_t buffered() const { return buf_.size(); }
-
-private:
-    std::string buf_;
-};
-
 // "?" replaced by SOH, handy for tests and logs.
 std::string soh(std::string_view pipe_separated, char sep = '|');
 // UTC "YYYYMMDD-HH:MM:SS.sss".
